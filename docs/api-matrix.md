@@ -5,7 +5,10 @@
 - `POST /auth/login` - Public
 - `POST /auth/refresh` - Public with refresh token
 - `POST /auth/logout` - Authenticated
-- `PUT /auth/users/:id/role` - `ADMIN`
+- `GET /auth/accounts` - `ADMIN`
+- `PUT /auth/accounts/:id/role` - `ADMIN`
+- `PUT /auth/accounts/:id/status` - `ADMIN`
+- `PUT /auth/accounts/:id/password` - `ADMIN`
 
 ## User Service
 

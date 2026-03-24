@@ -2,10 +2,18 @@
 import SidebarMenu from "../SidebarMenu";
 import { apiRequest } from "../../lib/api";
 import { exportRowsToCsv } from "../../lib/csv";
+import { getTranslation } from "../../i18n";
 
-function ProjectsPage({ token, projects, employees, reloadProjects }) {
+function ProjectsPage({
+  token,
+  projects,
+  employees,
+  reloadProjects,
+  showProjectManagement = true,
+  showAssignmentManagement = true
+}) {
   const PAGE_SIZE = 5;
-  const [status, setStatus] = useState("Sẵn sàng");
+  const [status, setStatus] = useState("Ready");
   const [projectForm, setProjectForm] = useState({
     id: "",
     projectCode: "",
@@ -25,6 +33,9 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
   const [assignments, setAssignments] = useState([]);
   const [projectSearch, setProjectSearch] = useState("");
   const [projectPage, setProjectPage] = useState(1);
+  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+  const [isProjectEditing, setIsProjectEditing] = useState(false);
+  const [viewProject, setViewProject] = useState(null);
   const [assignmentSearch, setAssignmentSearch] = useState("");
   const [assignmentPage, setAssignmentPage] = useState(1);
 
@@ -77,24 +88,30 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
         const data = await apiRequest(`/projects/${projectId}/assignments`, token);
         setAssignments(Array.isArray(data) ? data : []);
       } catch (error) {
-        setStatus(`Tải danh sách phân công thất bại: ${error.message}`);
+        setStatus(`Failed loading assignment list: ${error.message}`);
       }
     },
     [token]
   );
 
   useEffect(() => {
+    if (!showAssignmentManagement) {
+      return;
+    }
     if (!assignmentForm.projectId && projects[0]?.id) {
       setAssignmentForm((prev) => ({ ...prev, projectId: String(projects[0].id) }));
     }
     if (!assignmentForm.userId && employees[0]?.id) {
       setAssignmentForm((prev) => ({ ...prev, userId: String(employees[0].id) }));
     }
-  }, [projects, employees, assignmentForm.projectId, assignmentForm.userId]);
+  }, [projects, employees, assignmentForm.projectId, assignmentForm.userId, showAssignmentManagement]);
 
   useEffect(() => {
+    if (!showAssignmentManagement) {
+      return;
+    }
     loadAssignments(assignmentForm.projectId);
-  }, [assignmentForm.projectId, loadAssignments]);
+  }, [assignmentForm.projectId, loadAssignments, showAssignmentManagement]);
 
   useEffect(() => {
     setProjectPage(1);
@@ -104,11 +121,42 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
     setAssignmentPage(1);
   }, [assignmentSearch, assignmentForm.projectId]);
 
-  const createProject = async (event) => {
-    event.preventDefault();
+  const resetProjectForm = () => {
+    setProjectForm({
+      id: "",
+      projectCode: "",
+      name: "",
+      address: "",
+      latitude: "10.7769",
+      longitude: "106.7009",
+      status: "IN_PROGRESS"
+    });
+  };
+
+  const openCreateProjectModal = () => {
+    setIsProjectEditing(false);
+    resetProjectForm();
+    setIsProjectModalOpen(true);
+  };
+
+  const openEditProjectModal = (project) => {
+    setIsProjectEditing(true);
+    setProjectForm({
+      id: String(project.id),
+      projectCode: project.project_code || "",
+      name: project.name || "",
+      address: project.address || "",
+      latitude: String(project.latitude ?? "10.7769"),
+      longitude: String(project.longitude ?? "106.7009"),
+      status: project.status || "PLANNING"
+    });
+    setIsProjectModalOpen(true);
+  };
+
+  const createProject = async () => {
     try {
       if (invalidLatitude || invalidLongitude) {
-        setStatus("Vĩ độ phải nằm trong [-90, 90] và kinh độ trong [-180, 180]");
+        setStatus("Latitude must be in [-90, 90] and longitude in [-180, 180]");
         return;
       }
       const code = projectForm.projectCode || `PRJ-MNG-${Date.now()}`;
@@ -117,36 +165,29 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
         body: {
           projectCode: code,
           name: projectForm.name,
-          address: projectForm.address || "Quản lý tạo mới",
+          address: projectForm.address || "Created by manager",
           latitude: latitudeNumber,
           longitude: longitudeNumber,
           status: projectForm.status || "IN_PROGRESS"
         }
       });
-      setStatus("Tạo công trình thành công");
-      setProjectForm({
-        id: "",
-        projectCode: "",
-        name: "",
-        address: "",
-        latitude: "10.7769",
-        longitude: "106.7009",
-        status: "IN_PROGRESS"
-      });
+      setStatus("Project created successfully");
+      resetProjectForm();
+      setIsProjectModalOpen(false);
       reloadProjects();
     } catch (error) {
-      setStatus(`Tạo công trình thất bại: ${error.message}`);
+      setStatus(`Project creation failed: ${error.message}`);
     }
   };
 
   const updateProject = async () => {
     try {
       if (!projectForm.id) {
-        setStatus("Hãy chọn công trình trong bảng trước khi cập nhật");
+        setStatus("Please select a project from the table before updating");
         return;
       }
       if (invalidLatitude || invalidLongitude) {
-        setStatus("Vĩ độ phải nằm trong [-90, 90] và kinh độ trong [-180, 180]");
+        setStatus("Latitude must be in [-90, 90] and longitude in [-180, 180]");
         return;
       }
       await apiRequest(`/projects/${projectForm.id}`, token, {
@@ -159,53 +200,49 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
           status: projectForm.status
         }
       });
-      setStatus("Cập nhật công trình thành công");
+      setStatus("Project updated successfully");
+      setIsProjectModalOpen(false);
       reloadProjects();
     } catch (error) {
-      setStatus(`Cập nhật công trình thất bại: ${error.message}`);
+      setStatus(`Project update failed: ${error.message}`);
     }
   };
 
   const deleteProject = async (id) => {
     try {
       const target = projects.find((p) => p.id === id);
-      const ok = window.confirm(`Xóa công trình ${target?.project_code || id}? Hành động không thể hoàn tác.`);
+      const ok = window.confirm(`Delete project ${target?.project_code || id}? This action cannot be undone.`);
       if (!ok) {
         return;
       }
       await apiRequest(`/projects/${id}`, token, { method: "DELETE" });
-      setStatus("Xóa công trình thành công");
+      setStatus("Project deleted successfully");
       if (String(id) === assignmentForm.projectId) {
         setAssignmentForm((prev) => ({ ...prev, projectId: "" }));
       }
       reloadProjects();
     } catch (error) {
-      setStatus(`Xóa công trình thất bại: ${error.message}`);
+      setStatus(`Project deletion failed: ${error.message}`);
     }
   };
 
-  const pickProject = (project) => {
-    setProjectForm({
-      id: String(project.id),
-      projectCode: project.project_code,
-      name: project.name,
-      address: project.address || "",
-      latitude: String(project.latitude),
-      longitude: String(project.longitude),
-      status: project.status || "PLANNING"
-    });
-    setAssignmentForm((prev) => ({ ...prev, projectId: String(project.id) }));
-    loadAssignments(String(project.id));
+  const submitProjectForm = async (event) => {
+    event.preventDefault();
+    if (isProjectEditing) {
+      await updateProject();
+      return;
+    }
+    await createProject();
   };
 
   const saveAssignment = async () => {
     try {
       if (!assignmentForm.projectId || !assignmentForm.userId) {
-        setStatus("Vui lòng chọn công trình và nhân viên để phân công");
+        setStatus("Please select project and employee to assign");
         return;
       }
       if (invalidAssignmentTime) {
-        setStatus("Thời gian bat dau phai nho hon hoac bảng thời gian ket thuc");
+        setStatus("Start time must be earlier than end time");
         return;
       }
       await apiRequest("/projects/assignments", token, {
@@ -218,78 +255,47 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
           workEnd: assignmentForm.workEnd || null
         }
       });
-      setStatus("Luu phân công thành công");
+      setStatus("Assignment saved successfully");
       loadAssignments(assignmentForm.projectId);
     } catch (error) {
-      setStatus(`Luu phân công thất bại: ${error.message}`);
+      setStatus(`Assignment save failed: ${error.message}`);
     }
   };
 
   const removeAssignment = async (assignmentId) => {
     try {
       const target = assignments.find((a) => a.id === assignmentId);
-      const ok = window.confirm(`Huy phân công ${target?.employee_code || assignmentId} khoi công trình?`);
+      const ok = window.confirm(`Cancel assignment ${target?.employee_code || assignmentId} from project? Action cannot be undone.`);
       if (!ok) {
         return;
       }
       await apiRequest(`/projects/assignments/${assignmentId}`, token, { method: "DELETE" });
-      setStatus("Đã huy phân công");
+      setStatus("Assignment cancelled");
       loadAssignments(assignmentForm.projectId);
     } catch (error) {
-      setStatus(`Huy phân công thất bại: ${error.message}`);
+      setStatus(`Assignment cancel failed: ${error.message}`);
     }
   };
 
   return (
     <section className="space-y-4">
-      {status && !["Sẵn sàng", "Đã tải danh sách công trình", "Tạo công trình thành công", "Cập nhật công trình thành công", "Xóa công trình thành công", "Luu phân công thành công", "Đã huy phân công"].includes(status) && (
+      {status && !["Ready", "Project list loaded", "Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled"].includes(status) && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
-      {["Tạo công trình thành công", "Cập nhật công trình thành công", "Xóa công trình thành công", "Luu phân công thành công", "Đã huy phân công"].includes(status) && (
+      {["Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled"].includes(status) && (
         <div className="rounded-2xl bg-green-50 p-4 text-sm text-green-700 border border-green-200 flex items-center gap-2">
           <span className="text-lg">✓</span><span>{status}</span>
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <form onSubmit={createProject} className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="rounded-lg bg-blue-100 p-2"><span className="text-xl">🏗️</span></div>
-            <h3 className="text-lg font-bold text-steel">Quản lý công trình</h3>
-          </div>
-          <div className="grid gap-3">
-            <div className="grid grid-cols-2 gap-3">
-              <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="ID (để cập nhật)" value={projectForm.id} onChange={(e) => setProjectForm((p) => ({ ...p, id: e.target.value }))} />
-              <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Mã công trình" value={projectForm.projectCode} onChange={(e) => setProjectForm((p) => ({ ...p, projectCode: e.target.value }))} />
-            </div>
-            <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Tên công trình *" value={projectForm.name} onChange={(e) => setProjectForm((p) => ({ ...p, name: e.target.value }))} required />
-            <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Địa chỉ" value={projectForm.address} onChange={(e) => setProjectForm((p) => ({ ...p, address: e.target.value }))} />
-            <div className="grid grid-cols-2 gap-3">
-              <input className={`rounded-lg border px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-steel/10 ${invalidLatitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Vĩ độ *" value={projectForm.latitude} onChange={(e) => setProjectForm((p) => ({ ...p, latitude: e.target.value }))} required />
-              <input className={`rounded-lg border px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-steel/10 ${invalidLongitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Kinh độ *" value={projectForm.longitude} onChange={(e) => setProjectForm((p) => ({ ...p, longitude: e.target.value }))} required />
-            </div>
-            {(invalidLatitude || invalidLongitude) && (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Vĩ độ hợp lệ trong [-90, 90], Kinh độ hợp lệ trong [-180, 180].</p>
-            )}
-            <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={projectForm.status} onChange={(e) => setProjectForm((p) => ({ ...p, status: e.target.value }))}>
-              <option value="PLANNING">PLANNING</option>
-              <option value="IN_PROGRESS">IN_PROGRESS</option>
-              <option value="COMPLETED">COMPLETED</option>
-            </select>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button type="submit" className="rounded-lg bg-green-500 hover:bg-green-600 px-4 py-2.5 text-sm font-semibold text-white transition">➕ Tạo mới</button>
-            <button type="button" onClick={updateProject} className="rounded-lg bg-orange-500 hover:bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white transition">✏️ Cập nhật</button>
-            <button type="button" onClick={reloadProjects} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Tải lại</button>
-          </div>
-        </form>
-
-        <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
+      <div className={`grid gap-4 ${showProjectManagement && showAssignmentManagement ? "xl:grid-cols-2" : ""}`}>
+        {showAssignmentManagement && (
+          <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
           <div className="flex items-center gap-2 mb-4">
             <div className="rounded-lg bg-purple-100 p-2"><span className="text-xl">👥</span></div>
-            <h3 className="text-lg font-bold text-steel">Quản lý phân công</h3>
+            <h3 className="text-lg font-bold text-steel">Assignment Management</h3>
           </div>
           <div className="grid gap-3">
             <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={assignmentForm.projectId} onChange={(e) => setAssignmentForm((p) => ({ ...p, projectId: e.target.value }))}>
@@ -298,43 +304,43 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
             <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={assignmentForm.userId} onChange={(e) => setAssignmentForm((p) => ({ ...p, userId: e.target.value }))}>
               {employees.map((u) => <option key={u.id} value={u.id}>{u.employee_code} - {u.full_name}</option>)}
             </select>
-            <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Vai trò phân công" value={assignmentForm.assignmentRole} onChange={(e) => setAssignmentForm((p) => ({ ...p, assignmentRole: e.target.value }))} />
+            <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Assignment role" value={assignmentForm.assignmentRole} onChange={(e) => setAssignmentForm((p) => ({ ...p, assignmentRole: e.target.value }))} />
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-xs font-medium text-graphite/70 mb-1 block">Bắt đầu làm việc</label>
+                <label className="text-xs font-medium text-graphite/70 mb-1 block">Work start</label>
                 <input className="w-full rounded-lg border border-steel/20 px-3 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" type="datetime-local" value={assignmentForm.workStart} onChange={(e) => setAssignmentForm((p) => ({ ...p, workStart: e.target.value }))} />
               </div>
               <div>
-                <label className="text-xs font-medium text-graphite/70 mb-1 block">Kết thúc làm việc</label>
+                <label className="text-xs font-medium text-graphite/70 mb-1 block">Work end</label>
                 <input className="w-full rounded-lg border border-steel/20 px-3 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" type="datetime-local" value={assignmentForm.workEnd} onChange={(e) => setAssignmentForm((p) => ({ ...p, workEnd: e.target.value }))} />
               </div>
             </div>
             {invalidAssignmentTime && (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Thời gian bắt đầu phải nhỏ hơn thời gian kết thúc.</p>
+              <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Start time must be before end time.</p>
             )}
           </div>
           <div className="mt-4 flex gap-2">
-            <button type="button" onClick={saveAssignment} className="rounded-lg bg-violet-600 hover:bg-violet-700 px-4 py-2.5 text-sm font-semibold text-white transition">💾 Lưu phân công</button>
-            <button type="button" onClick={() => loadAssignments(assignmentForm.projectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Tải lại</button>
+            <button type="button" onClick={saveAssignment} className="rounded-lg bg-violet-600 hover:bg-violet-700 px-4 py-2.5 text-sm font-semibold text-white transition">💾 Save assignment</button>
+            <button type="button" onClick={() => loadAssignments(assignmentForm.projectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Reload</button>
           </div>
 
           <div className="mt-4 flex items-center justify-between gap-2">
             <input
               className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Tìm phân công theo mã/tên/vai trò"
+              placeholder="🔍 Search assignments by code/name/role"
               value={assignmentSearch}
               onChange={(e) => setAssignmentSearch(e.target.value)}
             />
-            <span className="text-xs text-graphite/60 whitespace-nowrap">{filteredAssignments.length} bản ghi</span>
+            <span className="text-xs text-graphite/60 whitespace-nowrap">{filteredAssignments.length} records</span>
           </div>
 
           <div className="mt-2 max-h-44 overflow-auto rounded-xl border border-steel/15">
             <table className="min-w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-steel/15 bg-steel/5">
-                  <th className="p-2 font-semibold text-steel">Nhân viên</th>
-                  <th className="p-2 font-semibold text-steel">Vai trò</th>
-                  <th className="p-2 font-semibold text-steel">Thao tác</th>
+                  <th className="p-2 font-semibold text-steel">Employee</th>
+                  <th className="p-2 font-semibold text-steel">Role</th>
+                  <th className="p-2 font-semibold text-steel">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -342,7 +348,7 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
                   <tr key={item.id} className="border-b border-steel/10 hover:bg-steel/5">
                     <td className="p-2 text-graphite">{item.employee_code} - {item.full_name}</td>
                     <td className="p-2 text-graphite">{item.assignment_role || "-"}</td>
-                    <td className="p-2"><button type="button" onClick={() => removeAssignment(item.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-2 py-1 text-xs font-semibold text-red-700 transition">Hủy</button></td>
+                    <td className="p-2"><button type="button" onClick={() => removeAssignment(item.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-2 py-1 text-xs font-semibold text-red-700 transition">Cancel</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -355,7 +361,7 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
               onClick={() => setAssignmentPage((p) => Math.max(1, p - 1))}
               className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition"
             >
-              ← Trước
+              ← Prev
             </button>
             <span className="text-graphite/70">{safeAssignmentPage}/{assignmentTotalPages}</span>
             <button
@@ -364,30 +370,36 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
               onClick={() => setAssignmentPage((p) => Math.min(assignmentTotalPages, p + 1))}
               className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition"
             >
-              Sau →
+              Next →
             </button>
           </div>
-        </section>
+          </section>
+        )}
       </div>
 
-      <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-4">
+      {showProjectManagement && (
+        <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">Danh sách công trình</h3>
-          <input
-            className="w-full max-w-sm rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-            placeholder="🔍 Tìm công trình theo mã/tên/trạng thái/địa chỉ"
-            value={projectSearch}
-            onChange={(e) => setProjectSearch(e.target.value)}
-          />
+          <h3 className="text-lg font-bold text-steel">Project List</h3>
+          <div className="flex w-full max-w-2xl items-center gap-2">
+            <input
+              className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
+              placeholder="🔍 Search projects by code/name/status/address"
+              value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)}
+            />
+            <button type="button" onClick={openCreateProjectModal} className="rounded-lg bg-green-500 hover:bg-green-600 px-4 py-2 text-sm font-semibold text-white transition whitespace-nowrap">Add Project</button>
+          </div>
         </div>
         <table className="min-w-full text-left text-sm">
           <thead>
             <tr className="border-b-2 border-steel/20 bg-steel/5">
-              <th className="p-3 font-semibold text-steel">Mã CT</th>
-              <th className="p-3 font-semibold text-steel">Tên công trình</th>
-              <th className="p-3 font-semibold text-steel">Trạng thái</th>
-              <th className="p-3 font-semibold text-steel">Địa chỉ</th>
-              <th className="p-3 font-semibold text-steel">Thao tác</th>
+              <th className="p-3 font-semibold text-steel">Project Code</th>
+              <th className="p-3 font-semibold text-steel">Project Name</th>
+              <th className="p-3 font-semibold text-steel">Status</th>
+              <th className="p-3 font-semibold text-steel">Address</th>
+              <th className="p-3 font-semibold text-steel">Coordinates</th>
+              <th className="p-3 font-semibold text-steel">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -402,15 +414,17 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
                   }}>{p.status}</span>
                 </td>
                 <td className="p-3 text-graphite text-sm">{p.address || "-"}</td>
+                <td className="p-3 text-graphite text-xs">{Number(p.latitude).toFixed(5)}, {Number(p.longitude).toFixed(5)}</td>
                 <td className="p-3 flex gap-2">
-                  <button type="button" onClick={() => pickProject(p)} className="rounded-lg bg-amber-100 hover:bg-amber-200 px-3 py-1.5 text-xs font-semibold text-amber-700 transition">Chọn</button>
-                  <button type="button" onClick={() => deleteProject(p.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 transition">Xóa</button>
+                  <button type="button" onClick={() => setViewProject(p)} className="rounded-lg bg-sky-100 hover:bg-sky-200 px-3 py-1.5 text-xs font-semibold text-sky-700 transition">View</button>
+                  <button type="button" onClick={() => openEditProjectModal(p)} className="rounded-lg bg-amber-100 hover:bg-amber-200 px-3 py-1.5 text-xs font-semibold text-amber-700 transition">Edit</button>
+                  <button type="button" onClick={() => deleteProject(p.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 transition">Delete</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        {pagedProjects.length === 0 && <div className="text-center py-6 text-graphite/60 text-sm">Không có công trình nào</div>}
+        {pagedProjects.length === 0 && <div className="text-center py-6 text-graphite/60 text-sm">No projects found</div>}
         <div className="mt-3 flex items-center justify-between text-xs">
           <button
             type="button"
@@ -418,26 +432,80 @@ function ProjectsPage({ token, projects, employees, reloadProjects }) {
             onClick={() => setProjectPage((p) => Math.max(1, p - 1))}
             className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition"
           >
-            ← Trước
+            ← Prev
           </button>
-          <span className="text-graphite/70">{safeProjectPage}/{projectTotalPages} — {filteredProjects.length} bản ghi</span>
+          <span className="text-graphite/70">{safeProjectPage}/{projectTotalPages} — {filteredProjects.length} records</span>
           <button
             type="button"
             disabled={safeProjectPage >= projectTotalPages}
             onClick={() => setProjectPage((p) => Math.min(projectTotalPages, p + 1))}
             className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition"
           >
-            Sau →
+            Next →
           </button>
         </div>
-      </section>
+        </section>
+      )}
+
+      {showProjectManagement && isProjectModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="text-lg font-bold">{isProjectEditing ? "Edit Project" : "Create New Project"}</h4>
+              <button type="button" onClick={() => setIsProjectModalOpen(false)} className="text-graphite hover:text-black">x</button>
+            </div>
+            <form onSubmit={submitProjectForm} className="space-y-3">
+              <div className="grid gap-3">
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Project Code *" value={projectForm.projectCode} onChange={(e) => setProjectForm((p) => ({ ...p, projectCode: e.target.value }))} required />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Project Name *" value={projectForm.name} onChange={(e) => setProjectForm((p) => ({ ...p, name: e.target.value }))} required />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Address" value={projectForm.address} onChange={(e) => setProjectForm((p) => ({ ...p, address: e.target.value }))} />
+                <div className="grid grid-cols-2 gap-3">
+                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLatitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Latitude *" value={projectForm.latitude} onChange={(e) => setProjectForm((p) => ({ ...p, latitude: e.target.value }))} required />
+                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLongitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Longitude *" value={projectForm.longitude} onChange={(e) => setProjectForm((p) => ({ ...p, longitude: e.target.value }))} required />
+                </div>
+                {(invalidLatitude || invalidLongitude) && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">Latitude must be in [-90, 90], longitude in [-180, 180].</p>}
+                <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" value={projectForm.status} onChange={(e) => setProjectForm((p) => ({ ...p, status: e.target.value }))}>
+                  <option value="PLANNING">PLANNING</option>
+                  <option value="IN_PROGRESS">IN_PROGRESS</option>
+                  <option value="COMPLETED">COMPLETED</option>
+                </select>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setIsProjectModalOpen(false)} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">Cancel</button>
+                <button type="submit" className="rounded-lg bg-blue-600 hover:bg-blue-700 px-4 py-2 text-sm font-semibold text-white">{isProjectEditing ? "Save Changes" : "Create Project"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showProjectManagement && viewProject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="text-lg font-bold">Project Details</h4>
+              <button type="button" onClick={() => setViewProject(null)} className="text-graphite hover:text-black">x</button>
+            </div>
+            <div className="space-y-2 text-sm">
+              <div><span className="font-semibold">Project Code:</span> {viewProject.project_code || "-"}</div>
+              <div><span className="font-semibold">Project Name:</span> {viewProject.name || "-"}</div>
+              <div><span className="font-semibold">Status:</span> {viewProject.status || "-"}</div>
+              <div><span className="font-semibold">Address:</span> {viewProject.address || "-"}</div>
+              <div><span className="font-semibold">Latitude:</span> {viewProject.latitude ?? "-"}</div>
+              <div><span className="font-semibold">Longitude:</span> {viewProject.longitude ?? "-"}</div>
+              <div><span className="font-semibold">Start Date:</span> {viewProject.start_date ? String(viewProject.start_date).slice(0, 10) : "-"}</div>
+              <div><span className="font-semibold">End Date:</span> {viewProject.end_date ? String(viewProject.end_date).slice(0, 10) : "-"}</div>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
 
 function TrackingPage({ token, projects, employees }) {
   const PAGE_SIZE = 6;
-  const [status, setStatus] = useState("Sẵn sàng");
+  const [status, setStatus] = useState("Ready");
   const [locations, setLocations] = useState([]);
   const [attendance, setAttendance] = useState([]);
   const [filters, setFilters] = useState({ projectId: "", userId: "", date: "" });
@@ -492,9 +560,9 @@ function TrackingPage({ token, projects, employees }) {
       const [loc, his] = await Promise.all([apiRequest(locPath, token), apiRequest(hisPath, token)]);
       setLocations(Array.isArray(loc) ? loc : []);
       setAttendance(Array.isArray(his) ? his : []);
-      setStatus("Đã tải dữ liệu theo dõi");
+      setStatus("Tracking data loaded");
     } catch (error) {
-      setStatus(`Tải dữ liệu theo dõi thất bại: ${error.message}`);
+      setStatus(`Failed to load tracking data: ${error.message}`);
     }
   }, [token, filters]);
 
@@ -514,8 +582,8 @@ function TrackingPage({ token, projects, employees }) {
     <section className="space-y-4">
       <div className="flex items-center justify-between rounded-2xl bg-white/50 p-4 backdrop-blur">
         <div>
-          <h2 className="text-xl font-bold text-steel">Chấm công và định vị</h2>
-          {status !== "Đã tải dữ liệu theo dõi" && status !== "Sẵn sàng" && (
+          <h2 className="text-xl font-bold text-steel">Attendance and Location</h2>
+          {status !== "Tracking data loaded" && status !== "Ready" && (
             <p className="text-sm text-red-600 mt-1">{status}</p>
           )}
         </div>
@@ -526,10 +594,10 @@ function TrackingPage({ token, projects, employees }) {
               exportRowsToCsv(
                 "manager-attendance-tracking.csv",
                 [
-                  { key: "employee_code", label: "Mã nhân viên" },
-                  { key: "full_name", label: "Họ và tên" },
-                  { key: "project_name", label: "Công trình" },
-                  { key: "check_in_time", label: "Vào ca" },
+                  { key: "employee_code", label: "Employee Code" },
+                  { key: "full_name", label: "Full Name" },
+                  { key: "project_name", label: "Project" },
+                  { key: "check_in_time", label: "Check-in" },
                   { key: "check_out_time", label: "Ra ca" }
                 ],
                 attendance
@@ -537,26 +605,26 @@ function TrackingPage({ token, projects, employees }) {
             }
             className="rounded-lg bg-orange-500 hover:bg-orange-600 px-4 py-2 text-sm font-semibold text-white transition"
           >
-            ↓ Xuất CSV
+            ↓ Export CSV
           </button>
-          <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Tải lại</button>
+          <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Reload</button>
         </div>
       </div>
 
       <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
         <div className="flex items-center gap-2 mb-3">
           <div className="rounded-lg bg-indigo-100 p-2"><span className="text-lg">🔍</span></div>
-          <h3 className="text-base font-bold text-steel">Bộ lọc theo dõi</h3>
+          <h3 className="text-base font-bold text-steel">Tracking Filters</h3>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none" value={filters.projectId} onChange={(e) => setFilters((p) => ({ ...p, projectId: e.target.value }))}>
-            <option value="">Tất cả công trình</option>
+            <option value="">All projects</option>
             {projects.map((project) => (
               <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
             ))}
           </select>
           <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none" value={filters.userId} onChange={(e) => setFilters((p) => ({ ...p, userId: e.target.value }))}>
-            <option value="">Tất cả nhân viên</option>
+            <option value="">All employees</option>
             {employees.map((employee) => (
               <option key={employee.id} value={employee.id}>{employee.employee_code} - {employee.full_name}</option>
             ))}
@@ -570,11 +638,11 @@ function TrackingPage({ token, projects, employees }) {
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <div className="rounded-lg bg-cyan-100 p-1.5"><span className="text-base">📍</span></div>
-              <h3 className="text-base font-bold text-steel">Vị trí nhân viên mới nhất</h3>
+              <h3 className="text-base font-bold text-steel">Latest employee locations</h3>
             </div>
             <input
               className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Tìm vị trí"
+              placeholder="🔍 Search locations"
               value={locationSearch}
               onChange={(e) => setLocationSearch(e.target.value)}
             />
@@ -582,11 +650,11 @@ function TrackingPage({ token, projects, employees }) {
           <table className="min-w-full text-left text-sm">
             <thead>
               <tr className="border-b-2 border-steel/20 bg-steel/5">
-                <th className="p-2 font-semibold text-steel">Nhân viên</th>
-                <th className="p-2 font-semibold text-steel">Công trình</th>
-                <th className="p-2 font-semibold text-steel">Vĩ độ</th>
-                <th className="p-2 font-semibold text-steel">Kinh độ</th>
-                <th className="p-2 font-semibold text-steel">Cập nhật</th>
+                <th className="p-2 font-semibold text-steel">Employee</th>
+                <th className="p-2 font-semibold text-steel">Project</th>
+                <th className="p-2 font-semibold text-steel">Latitude</th>
+                <th className="p-2 font-semibold text-steel">Longitude</th>
+                <th className="p-2 font-semibold text-steel">Updated</th>
               </tr>
             </thead>
             <tbody>
@@ -601,11 +669,11 @@ function TrackingPage({ token, projects, employees }) {
               ))}
             </tbody>
           </table>
-          {pagedLocations.length === 0 && <div className="text-center py-4 text-graphite/60 text-sm">Không có dữ liệu vị trí</div>}
+          {pagedLocations.length === 0 && <div className="text-center py-4 text-graphite/60 text-sm">No location data available</div>}
           <div className="mt-2 flex items-center justify-between text-xs">
-            <button type="button" disabled={safeLocationPage <= 1} onClick={() => setLocationPage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Trước</button>
-            <span className="text-graphite/70">{safeLocationPage}/{locationTotalPages} — {filteredLocations.length} bản ghi</span>
-            <button type="button" disabled={safeLocationPage >= locationTotalPages} onClick={() => setLocationPage((p) => Math.min(locationTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Sau →</button>
+            <button type="button" disabled={safeLocationPage <= 1} onClick={() => setLocationPage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Prev</button>
+            <span className="text-graphite/70">{safeLocationPage}/{locationTotalPages} — {filteredLocations.length} records</span>
+            <button type="button" disabled={safeLocationPage >= locationTotalPages} onClick={() => setLocationPage((p) => Math.min(locationTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Next →</button>
           </div>
         </section>
 
@@ -613,11 +681,11 @@ function TrackingPage({ token, projects, employees }) {
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <div className="rounded-lg bg-green-100 p-1.5"><span className="text-base">📋</span></div>
-              <h3 className="text-base font-bold text-steel">Nhật ký chấm công</h3>
+              <h3 className="text-base font-bold text-steel">Attendance logs</h3>
             </div>
             <input
               className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Tìm chấm công"
+              placeholder="🔍 Search attendance"
               value={attendanceSearch}
               onChange={(e) => setAttendanceSearch(e.target.value)}
             />
@@ -625,9 +693,9 @@ function TrackingPage({ token, projects, employees }) {
           <table className="min-w-full text-left text-sm">
             <thead>
               <tr className="border-b-2 border-steel/20 bg-steel/5">
-                <th className="p-2 font-semibold text-steel">Nhân viên</th>
-                <th className="p-2 font-semibold text-steel">Công trình</th>
-                <th className="p-2 font-semibold text-steel">Vào ca</th>
+                <th className="p-2 font-semibold text-steel">Employee</th>
+                <th className="p-2 font-semibold text-steel">Project</th>
+                <th className="p-2 font-semibold text-steel">Check-in</th>
                 <th className="p-2 font-semibold text-steel">Ra ca</th>
               </tr>
             </thead>
@@ -638,17 +706,17 @@ function TrackingPage({ token, projects, employees }) {
                   <td className="p-2 text-graphite">{a.project_name}</td>
                   <td className="p-2 text-graphite text-xs">{a.check_in_time || "-"}</td>
                   <td className="p-2 text-xs">
-                    <span className={a.check_out_time ? "text-green-700 font-semibold" : "text-graphite/60"}>{a.check_out_time || "Đang làm"}</span>
+                    <span className={a.check_out_time ? "text-green-700 font-semibold" : "text-graphite/60"}>{a.check_out_time || "Working"}</span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {pagedAttendance.length === 0 && <div className="text-center py-4 text-graphite/60 text-sm">Không có dữ liệu chấm công</div>}
+          {pagedAttendance.length === 0 && <div className="text-center py-4 text-graphite/60 text-sm">No attendance data available</div>}
           <div className="mt-2 flex items-center justify-between text-xs">
-            <button type="button" disabled={safeAttendancePage <= 1} onClick={() => setAttendancePage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Trước</button>
-            <span className="text-graphite/70">{safeAttendancePage}/{attendanceTotalPages} — {filteredAttendance.length} bản ghi</span>
-            <button type="button" disabled={safeAttendancePage >= attendanceTotalPages} onClick={() => setAttendancePage((p) => Math.min(attendanceTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Sau →</button>
+            <button type="button" disabled={safeAttendancePage <= 1} onClick={() => setAttendancePage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Prev</button>
+            <span className="text-graphite/70">{safeAttendancePage}/{attendanceTotalPages} — {filteredAttendance.length} records</span>
+            <button type="button" disabled={safeAttendancePage >= attendanceTotalPages} onClick={() => setAttendancePage((p) => Math.min(attendanceTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Next →</button>
           </div>
         </section>
       </div>
@@ -658,7 +726,7 @@ function TrackingPage({ token, projects, employees }) {
 
 function ProgressPage({ token, projects }) {
   const PAGE_SIZE = 6;
-  const [status, setStatus] = useState("Sẵn sàng");
+  const [status, setStatus] = useState("Ready");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [progressPercent, setProgressPercent] = useState("0");
   const [note, setNote] = useState("");
@@ -690,9 +758,9 @@ function ProgressPage({ token, projects }) {
       try {
         const data = await apiRequest(`/projects/${projectId}/progress`, token);
         setHistory(Array.isArray(data) ? data : []);
-        setStatus("Đã tải lịch sử tiến độ");
+        setStatus("Progress history loaded");
       } catch (error) {
-        setStatus(`Tải lịch sử tiến độ thất bại: ${error.message}`);
+        setStatus(`Failed to load progress history: ${error.message}`);
       }
     },
     [token]
@@ -716,11 +784,11 @@ function ProgressPage({ token, projects }) {
     event.preventDefault();
     try {
       if (!selectedProjectId) {
-        setStatus("Vui lòng chọn công trình trước");
+        setStatus("Please select a project first");
         return;
       }
       if (invalidProgress) {
-        setStatus("Tiến độ phai trong khoang 0 den 100");
+        setStatus("Progress must be between 0 and 100");
         return;
       }
       await apiRequest(`/projects/${selectedProjectId}/progress`, token, {
@@ -730,22 +798,22 @@ function ProgressPage({ token, projects }) {
           note
         }
       });
-      setStatus("Cập nhật tiến độ thành công");
+      setStatus("Progress updated successfully");
       setNote("");
       loadHistory(selectedProjectId);
     } catch (error) {
-      setStatus(`Cập nhật tiến độ thất bại: ${error.message}`);
+      setStatus(`Progress update failed: ${error.message}`);
     }
   };
 
   return (
     <section className="space-y-4">
-      {status && !["Sẵn sàng", "Đã tải lịch sử tiến độ", "Cập nhật tiến độ thành công"].includes(status) && (
+      {status && !["Ready", "Progress history loaded", "Progress updated successfully"].includes(status) && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
-      {status === "Cập nhật tiến độ thành công" && (
+      {status === "Progress updated successfully" && (
         <div className="rounded-2xl bg-green-50 p-4 text-sm text-green-700 border border-green-200 flex items-center gap-2">
           <span className="text-lg">✓</span><span>{status}</span>
         </div>
@@ -754,7 +822,7 @@ function ProgressPage({ token, projects }) {
       <form onSubmit={submitProgress} className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
         <div className="flex items-center gap-2 mb-4">
           <div className="rounded-lg bg-emerald-100 p-2"><span className="text-xl">📈</span></div>
-          <h3 className="text-lg font-bold text-steel">Cập nhật tiến độ công trình</h3>
+          <h3 className="text-lg font-bold text-steel">Update Project Progress</h3>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
@@ -763,45 +831,45 @@ function ProgressPage({ token, projects }) {
             ))}
           </select>
           <div>
-            <label className="text-xs font-medium text-graphite/70 mb-1 block">Tiến độ (0–100%)</label>
+            <label className="text-xs font-medium text-graphite/70 mb-1 block">Progress (0-100%)</label>
             <input className={`w-full rounded-lg border px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-steel/10 ${invalidProgress ? "border-red-400 bg-red-50" : "border-steel/20"}`} type="number" min="0" max="100" value={progressPercent} onChange={(e) => setProgressPercent(e.target.value)} />
           </div>
-          <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} />
+          <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Note" value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
         {invalidProgress && (
-          <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Tiến độ không hợp lệ. Giá trị hợp lệ từ 0 đến 100.</p>
+          <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Invalid progress. Valid range is 0 to 100.</p>
         )}
         <div className="mt-4 flex flex-wrap gap-2">
-          <button type="submit" disabled={invalidProgress} className="rounded-lg bg-emerald-500 hover:bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 transition">📈 Cập nhật tiến độ</button>
-          <button type="button" onClick={() => loadHistory(selectedProjectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Tải lại lịch sử</button>
+          <button type="submit" disabled={invalidProgress} className="rounded-lg bg-emerald-500 hover:bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 transition">📈 Update Progress</button>
+          <button type="button" onClick={() => loadHistory(selectedProjectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Reload History</button>
           <button
             type="button"
             onClick={() =>
               exportRowsToCsv(
                 "manager-progress-history.csv",
                 [
-                  { key: "project_id", label: "ID công trình" },
-                  { key: "progress_percent", label: "Tiến độ (%)" },
-                  { key: "note", label: "Ghi chú" },
-                  { key: "updated_by_name", label: "Người cập nhật" },
-                  { key: "created_at", label: "Thời điểm tạo" }
+                  { key: "project_id", label: "Project ID" },
+                  { key: "progress_percent", label: "Progress (%)" },
+                  { key: "note", label: "Note" },
+                  { key: "updated_by_name", label: "Updated by" },
+                  { key: "created_at", label: "Created at" }
                 ],
                 history
               )
             }
             className="rounded-lg bg-orange-500 hover:bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white transition"
           >
-            ↓ Xuất CSV
+            ↓ Export CSV
           </button>
         </div>
       </form>
 
       <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
         <div className="mb-4 flex items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">Lịch sử tiến độ</h3>
+          <h3 className="text-lg font-bold text-steel">Progress History</h3>
           <input
             className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-            placeholder="🔍 Tìm lịch sử tiến độ"
+            placeholder="🔍 Search progress history"
             value={historySearch}
             onChange={(e) => setHistorySearch(e.target.value)}
           />
@@ -809,10 +877,10 @@ function ProgressPage({ token, projects }) {
         <table className="min-w-full text-left text-sm">
           <thead>
             <tr className="border-b-2 border-steel/20 bg-steel/5">
-              <th className="p-3 font-semibold text-steel">Tiến độ</th>
-              <th className="p-3 font-semibold text-steel">Ghi chú</th>
-              <th className="p-3 font-semibold text-steel">Người cập nhật</th>
-              <th className="p-3 font-semibold text-steel">Thời điểm</th>
+              <th className="p-3 font-semibold text-steel">Progress</th>
+              <th className="p-3 font-semibold text-steel">Note</th>
+              <th className="p-3 font-semibold text-steel">Updated by</th>
+              <th className="p-3 font-semibold text-steel">Timestamp</th>
             </tr>
           </thead>
           <tbody>
@@ -833,11 +901,11 @@ function ProgressPage({ token, projects }) {
             ))}
           </tbody>
         </table>
-        {pagedHistory.length === 0 && <div className="text-center py-6 text-graphite/60 text-sm">Chưa có lịch sử tiến độ</div>}
+        {pagedHistory.length === 0 && <div className="text-center py-6 text-graphite/60 text-sm">No progress history yet</div>}
         <div className="mt-3 flex items-center justify-between text-xs">
-          <button type="button" disabled={safeHistoryPage <= 1} onClick={() => setHistoryPage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Trước</button>
-          <span className="text-graphite/70">{safeHistoryPage}/{historyTotalPages} — {filteredHistory.length} bản ghi</span>
-          <button type="button" disabled={safeHistoryPage >= historyTotalPages} onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Sau →</button>
+          <button type="button" disabled={safeHistoryPage <= 1} onClick={() => setHistoryPage((p) => Math.max(1, p - 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">← Prev</button>
+          <span className="text-graphite/70">{safeHistoryPage}/{historyTotalPages} — {filteredHistory.length} records</span>
+          <button type="button" disabled={safeHistoryPage >= historyTotalPages} onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))} className="rounded-lg bg-steel/10 hover:bg-steel/20 px-3 py-1.5 disabled:opacity-50 transition">Next →</button>
         </div>
       </section>
     </section>
@@ -845,7 +913,7 @@ function ProgressPage({ token, projects }) {
 }
 
 function ReportsPage({ token }) {
-  const [status, setStatus] = useState("Sẵn sàng");
+  const [status, setStatus] = useState("Ready");
   const [attendanceSummary, setAttendanceSummary] = useState([]);
   const [progressSummary, setProgressSummary] = useState([]);
 
@@ -857,9 +925,9 @@ function ReportsPage({ token }) {
       ]);
       setAttendanceSummary(Array.isArray(att) ? att : []);
       setProgressSummary(Array.isArray(progress) ? progress : []);
-      setStatus("Đã tải báo cáo");
+      setStatus("Reports loaded");
     } catch (error) {
-      setStatus(`Tải báo cáo thất bại: ${error.message}`);
+      setStatus(`Failed to load reports: ${error.message}`);
     }
   }, [token]);
 
@@ -870,22 +938,22 @@ function ReportsPage({ token }) {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between rounded-2xl bg-white/50 p-4 backdrop-blur">
-        <h2 className="text-2xl font-bold text-steel">Báo cáo tổng hợp</h2>
-        <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Tải lại</button>
+        <h2 className="text-2xl font-bold text-steel">Reporting Summary</h2>
+        <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Reload</button>
       </div>
-      {status && status !== "Đã tải báo cáo" && status !== "Sẵn sàng" && (
+      {status && status !== "Reports loaded" && status !== "Ready" && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
 
       <div className="grid gap-4 xl:grid-cols-2">
-        {/* Tổng hợp chấm công - Cyan/Blue card */}
+        {/* Attendance Summary - Cyan/Blue card */}
         <section className="rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-500 p-5 text-white shadow-lg overflow-hidden">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="rounded-lg bg-white/20 p-2"><span className="text-xl">⏱️</span></div>
-              <h3 className="text-lg font-bold">Tổng hợp chấm công</h3>
+              <h3 className="text-lg font-bold">Attendance Summary</h3>
             </div>
             <button
               type="button"
@@ -893,12 +961,12 @@ function ReportsPage({ token }) {
                 exportRowsToCsv(
                   "manager-attendance-summary.csv",
                   [
-                    { key: "employee_code", label: "Mã nhân viên" },
-                    { key: "full_name", label: "Họ và tên" },
-                    { key: "total_shifts", label: "Tổng ca" },
-                    { key: "completed_shifts", label: "Ca hoàn thành" },
-                    { key: "first_check_in", label: "Vào ca đầu tiên" },
-                    { key: "last_check_in", label: "Vào ca gần nhất" }
+                    { key: "employee_code", label: "Employee Code" },
+                    { key: "full_name", label: "Full Name" },
+                    { key: "total_shifts", label: "Total shifts" },
+                    { key: "completed_shifts", label: "Completed shifts" },
+                    { key: "first_check_in", label: "First check-in" },
+                    { key: "last_check_in", label: "Latest check-in" }
                   ],
                   attendanceSummary
                 )
@@ -912,9 +980,9 @@ function ReportsPage({ token }) {
             <table className="min-w-full text-left text-white">
               <thead>
                 <tr className="border-b border-white/30">
-                  <th className="p-2 font-semibold">Nhân viên</th>
-                  <th className="p-2 font-semibold text-center">Tổng</th>
-                  <th className="p-2 font-semibold text-center">Hoàn thành</th>
+                  <th className="p-2 font-semibold">Employee</th>
+                  <th className="p-2 font-semibold text-center">Total</th>
+                  <th className="p-2 font-semibold text-center">Completed</th>
                 </tr>
               </thead>
               <tbody>
@@ -927,16 +995,16 @@ function ReportsPage({ token }) {
                 ))}
               </tbody>
             </table>
-            {attendanceSummary.length === 0 && <div className="text-center py-4 text-white/70">Không có dữ liệu</div>}
+            {attendanceSummary.length === 0 && <div className="text-center py-4 text-white/70">No data available</div>}
           </div>
         </section>
 
-        {/* Tổng hợp tiến độ công trình - Green card */}
+        {/* Project Progress Summary - Green card */}
         <section className="rounded-2xl bg-gradient-to-br from-emerald-400 to-green-500 p-5 text-white shadow-lg overflow-hidden">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="rounded-lg bg-white/20 p-2"><span className="text-xl">📊</span></div>
-              <h3 className="text-lg font-bold">Tiến độ công trình</h3>
+              <h3 className="text-lg font-bold">Project Progress</h3>
             </div>
             <button
               type="button"
@@ -944,11 +1012,11 @@ function ReportsPage({ token }) {
                 exportRowsToCsv(
                   "manager-project-progress-summary.csv",
                   [
-                    { key: "project_code", label: "Mã công trình" },
-                    { key: "name", label: "Tên công trình" },
-                    { key: "status", label: "Trạng thái" },
-                    { key: "latest_progress_percent", label: "Tiến độ mới nhất (%)" },
-                    { key: "latest_progress_time", label: "Thời điểm cập nhật" }
+                    { key: "project_code", label: "Project Code" },
+                    { key: "name", label: "Project Name" },
+                    { key: "status", label: "Status" },
+                    { key: "latest_progress_percent", label: "Latest progress (%)" },
+                    { key: "latest_progress_time", label: "Updated at" }
                   ],
                   progressSummary
                 )
@@ -962,9 +1030,9 @@ function ReportsPage({ token }) {
             <table className="min-w-full text-left text-white">
               <thead>
                 <tr className="border-b border-white/30">
-                  <th className="p-2 font-semibold">Công trình</th>
-                  <th className="p-2 font-semibold">Trạng thái</th>
-                  <th className="p-2 font-semibold text-right">Tiến độ</th>
+                  <th className="p-2 font-semibold">Project</th>
+                  <th className="p-2 font-semibold">Status</th>
+                  <th className="p-2 font-semibold text-right">Progress</th>
                 </tr>
               </thead>
               <tbody>
@@ -977,7 +1045,7 @@ function ReportsPage({ token }) {
                 ))}
               </tbody>
             </table>
-            {progressSummary.length === 0 && <div className="text-center py-4 text-white/70">Không có dữ liệu</div>}
+            {progressSummary.length === 0 && <div className="text-center py-4 text-white/70">No data available</div>}
           </div>
         </section>
       </div>
@@ -1002,31 +1070,52 @@ export default function ManagerWorkspace({ token, profile }) {
 
   const menuItems = useMemo(
     () => [
-      { key: "projects", label: "Công trình và phân công" },
-      { key: "tracking", label: "Chấm công và định vị" },
-      { key: "progress", label: "Quản lý tiến độ" },
-      { key: "reports", label: "Báo cáo" }
+      { key: "project-management", label: "Project Management" },
+      { key: "assignment", label: "Assignment" },
+      { key: "tracking", label: getTranslation("en", "attendanceTracking") },
+      { key: "progress", label: getTranslation("en", "progressManagement") },
+      { key: "reports", label: getTranslation("en", "reports") }
     ],
     []
   );
 
-  const [activePage, setActivePage] = useState("projects");
+  const [activePage, setActivePage] = useState("project-management");
 
   return (
-    <section className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+    <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
       <SidebarMenu
-        title="Không gian làm việc Quản lý"
-        subtitle={`Đăng nhập: ${profile?.fullName}`}
+        title={getTranslation("en", "managerWorkspace")}
         items={menuItems}
         activeKey={activePage}
         onChange={setActivePage}
       />
-      <div className="min-w-0 rounded-3xl bg-white/80 p-4 shadow-soft backdrop-blur">
+      <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
         {activePage === "tracking" && <TrackingPage token={token} projects={projects} employees={employees} />}
         {activePage === "progress" && <ProgressPage token={token} projects={projects} />}
         {activePage === "reports" && <ReportsPage token={token} />}
-        {activePage === "projects" && <ProjectsPage token={token} projects={projects} employees={employees} reloadProjects={loadMasterData} />}
+        {activePage === "project-management" && (
+          <ProjectsPage
+            token={token}
+            projects={projects}
+            employees={employees}
+            reloadProjects={loadMasterData}
+            showProjectManagement
+            showAssignmentManagement={false}
+          />
+        )}
+        {activePage === "assignment" && (
+          <ProjectsPage
+            token={token}
+            projects={projects}
+            employees={employees}
+            reloadProjects={loadMasterData}
+            showProjectManagement={false}
+            showAssignmentManagement
+          />
+        )}
       </div>
     </section>
   );
 }
+
+

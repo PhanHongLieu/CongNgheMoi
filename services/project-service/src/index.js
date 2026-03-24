@@ -105,6 +105,31 @@ app.get("/projects/my", authenticate, authorize("EMPLOYEE"), async (req, res) =>
   }
 });
 
+app.get("/schedule", authenticate, authorize("EMPLOYEE"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT pa.*, p.name AS project_name, p.address, p.status AS project_status
+       FROM project_assignments pa
+       JOIN projects p ON pa.project_id = p.id
+       WHERE pa.user_id = $1
+       ORDER BY pa.work_start DESC`,
+      [req.user.sub]
+    );
+
+    await writeDataLog({
+      action: "read",
+      collection: "schedule",
+      recordId: String(req.user.sub),
+      username: req.user.email,
+      metadata: { count: result.rows.length }
+    });
+
+    return res.json(result.rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch schedule", error: error.message });
+  }
+});
+
 app.post("/projects", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
   try {
     const {
@@ -213,7 +238,8 @@ app.get("/projects/:id/assignments", authenticate, async (req, res) => {
     const projectId = Number(req.params.id);
     const result = await pool.query(
       `SELECT pa.id, pa.user_id, pa.project_id, pa.assignment_role, pa.work_start, pa.work_end,
-              u.full_name, u.employee_code, p.name AS project_name
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
+              u.employee_code, p.name AS project_name
        FROM project_assignments pa
        JOIN users u ON pa.user_id = u.id
        JOIN projects p ON pa.project_id = p.id
@@ -350,7 +376,7 @@ app.get("/projects/:id(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGE
   try {
     const projectId = Number(req.params.id);
     const result = await pool.query(
-      `SELECT ppu.*, u.full_name AS updated_by_name
+      `SELECT ppu.*, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS updated_by_name
        FROM project_progress_updates ppu
        LEFT JOIN users u ON ppu.updated_by = u.id
        WHERE ppu.project_id = $1

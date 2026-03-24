@@ -239,7 +239,10 @@ app.get("/attendance/history", authenticate, async (req, res) => {
 
     const condition = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const query = `
-      SELECT a.*, u.full_name, u.employee_code, p.name AS project_name
+      SELECT a.*,
+             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
+             u.employee_code,
+             p.name AS project_name
       FROM attendance_logs a
       JOIN users u ON a.user_id = u.id
       JOIN projects p ON a.project_id = p.id
@@ -332,7 +335,7 @@ app.get("/attendance/location/latest", authenticate, authorize("ADMIN", "MANAGER
          el.longitude,
          el.source,
          el.created_at,
-         u.full_name,
+         COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
          u.employee_code,
          p.name AS project_name
        FROM employee_locations el
@@ -376,7 +379,7 @@ app.get("/attendance/reports/attendance-summary", authenticate, authorize("ADMIN
     const result = await pool.query(
       `SELECT u.id AS user_id,
               u.employee_code,
-              u.full_name,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
               COUNT(a.id) AS total_shifts,
               COUNT(a.check_out_time) AS completed_shifts,
               MIN(a.check_in_time) AS first_check_in,
@@ -384,8 +387,8 @@ app.get("/attendance/reports/attendance-summary", authenticate, authorize("ADMIN
        FROM users u
        LEFT JOIN attendance_logs a ON u.id = a.user_id
        ${condition}
-       GROUP BY u.id, u.employee_code, u.full_name
-       ORDER BY u.full_name ASC`,
+       GROUP BY u.id, u.employee_code, u.first_name, u.last_name, u.full_name
+       ORDER BY COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) ASC`,
       values
     );
 
@@ -408,7 +411,7 @@ app.get("/attendance/reports/hr-summary", authenticate, authorize("ADMIN"), asyn
     const [userSummary, projectSummary, attendanceSummary] = await Promise.all([
       pool.query(
         `SELECT role, COUNT(*)::int AS total
-         FROM users
+         FROM accounts
          GROUP BY role
          ORDER BY role`
       ),

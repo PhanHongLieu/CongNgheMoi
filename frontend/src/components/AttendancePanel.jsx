@@ -32,7 +32,7 @@ export default function AttendancePanel({ token, profile }) {
           setSelectedProject(String(data[0].id));
         }
       } catch (error) {
-        setStatus(`Tải danh sách công trình thất bại: ${error.message}`, "error");
+        setStatus(`Failed loading project list: ${error.message}`, "error");
       }
     };
     fetchProjects();
@@ -45,9 +45,9 @@ export default function AttendancePanel({ token, profile }) {
         videoRef.current.srcObject = stream;
         setStreaming(true);
       }
-      setStatus("Camera đã sẵn sàng — hãy căn khuôn mặt vào khung hình", "idle");
+      setStatus("Camera ready — align your face in the frame", "idle");
     } catch (error) {
-      setStatus(`Không thể truy cập camera: ${error.message}`, "error");
+      setStatus(`Unable to access camera: ${error.message}`, "error");
     }
   };
 
@@ -64,7 +64,7 @@ export default function AttendancePanel({ token, profile }) {
     const width = videoRef.current.videoWidth;
     const height = videoRef.current.videoHeight;
     if (!width || !height) {
-      setStatus("Camera chưa có khung hình — vui lòng đợi giây lát", "error");
+      setStatus("Camera frame not ready — please wait briefly", "error");
       return;
     }
     const ctx = canvasRef.current.getContext("2d");
@@ -74,7 +74,7 @@ export default function AttendancePanel({ token, profile }) {
     const imageData = canvasRef.current.toDataURL("image/jpeg", 0.9);
     setFaceTemplate(imageData);
     setFacePreview(imageData);
-    setStatus("Đã chụp mẫu khuôn mặt thành công", "success");
+    setStatus("Face template captured successfully", "success");
   };
 
   const fetchGPS = () =>
@@ -98,9 +98,9 @@ export default function AttendancePanel({ token, profile }) {
   const refreshGPS = async () => {
     try {
       await fetchGPS();
-      setStatus("Đã cập nhật vị trí GPS", "success");
+      setStatus("GPS position updated", "success");
     } catch (error) {
-      setStatus(`Không thể lấy vị trí GPS: ${error.message}`, "error");
+      setStatus(`Unable to get GPS position: ${error.message}`, "error");
     }
   };
 
@@ -109,16 +109,16 @@ export default function AttendancePanel({ token, profile }) {
   const submitAttendance = async (type) => {
     try {
       if (!selectedProject) {
-        setStatus("Vui lòng chọn công trình trước khi chấm công", "error");
+        setStatus("Please select a project before checking attendance", "error");
         return;
       }
       if (type === "in" && !faceTemplate) {
-        setStatus("Hãy chụp khuôn mặt trước khi vào ca", "error");
+        setStatus("Please capture face template before check-in", "error");
         return;
       }
-      setStatus("Đang xác định vị trí GPS...", "loading");
+      setStatus("Acquiring GPS coordinates...", "loading");
       const coords = await getCurrentPosition();
-      setStatus("Đang gửi dữ liệu chấm công...", "loading");
+      setStatus("Submitting attendance data...", "loading");
 
       const endpoint = type === "in" ? "check-in" : "check-out";
       const payload = {
@@ -139,17 +139,17 @@ export default function AttendancePanel({ token, profile }) {
 
       const data = await response.json();
       if (!response.ok) {
-        setStatus(data.message || "Yêu cầu chấm công thất bại", "error");
+        setStatus(data.message || "Attendance request failed", "error");
         return;
       }
-      setStatus(`${type === "in" ? "Vào ca" : "Ra ca"} thành công lúc ${new Date().toLocaleTimeString("vi-VN")}`, "success");
+      setStatus(`${type === "in" ? "Check-in" : "Check-out"} successful at ${new Date().toLocaleTimeString("en-US")}`, "success");
       if (type === "in") {
         setFaceTemplate("");
         setFacePreview("");
         stopCamera();
       }
     } catch (error) {
-      setStatus(`Lỗi chấm công: ${error.message}`, "error");
+      setStatus(`Attendance error: ${error.message}`, "error");
     }
   };
 
@@ -172,8 +172,8 @@ export default function AttendancePanel({ token, profile }) {
         <div className="flex items-center gap-2">
           <div className="rounded-lg bg-indigo-100 p-2"><span className="text-xl">📷</span></div>
           <div>
-            <h2 className="text-xl font-bold text-steel">Chấm công khuôn mặt + GPS</h2>
-            <p className="text-xs text-graphite/60">Xin chào, {profile?.fullName || "Nhân viên"}</p>
+            <h2 className="text-xl font-bold text-steel">Face + GPS Attendance</h2>
+            <p className="text-xs text-graphite/60">Hello, {profile?.fullName || "Employee"}</p>
           </div>
         </div>
       </div>
@@ -187,14 +187,14 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-blue-100 p-1.5"><span>🏗️</span></div>
-              <h3 className="font-semibold text-steel">Bước 1 — Chọn công trình</h3>
+              <h3 className="font-semibold text-steel">Step 1 — Select Project</h3>
             </div>
             <select
               className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm text-graphite focus:outline-none focus:ring-2 focus:ring-steel/30"
               value={selectedProject}
               onChange={(e) => setSelectedProject(e.target.value)}
             >
-              {projects.length === 0 && <option value="">Chưa có công trình được phân công</option>}
+              {projects.length === 0 && <option value="">No assigned projects yet</option>}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.project_code} — {p.name}</option>
               ))}
@@ -205,29 +205,29 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-orange-100 p-1.5"><span>📸</span></div>
-              <h3 className="font-semibold text-steel">Bước 2 — Chụp khuôn mặt</h3>
+              <h3 className="font-semibold text-steel">Step 2 — Capture Face</h3>
             </div>
             <div className="flex flex-wrap gap-2">
               {!streaming ? (
                 <button type="button" onClick={startCamera}
                   className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-sm font-semibold text-white transition">
-                  📷 Bật camera
+                  📷 Start Camera
                 </button>
               ) : (
                 <button type="button" onClick={stopCamera}
                   className="rounded-lg bg-steel/20 hover:bg-steel/30 px-4 py-2 text-sm font-semibold text-graphite transition">
-                  ✕ Tắt camera
+                  ✕ Stop Camera
                 </button>
               )}
               <button type="button" onClick={captureFaceTemplate} disabled={!streaming}
                 className="rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-40 px-4 py-2 text-sm font-semibold text-white transition">
-                📸 Chụp mẫu khuôn mặt
+                📸 Capture Face
               </button>
             </div>
             {facePreview && (
               <div className="mt-3">
-                <p className="mb-1 text-xs font-medium text-graphite/60">Ảnh đã chụp:</p>
-                <img src={facePreview} alt="Mẫu khuôn mặt" className="h-20 w-28 rounded-xl object-cover border border-steel/15 shadow-sm" />
+                <p className="mb-1 text-xs font-medium text-graphite/60">Captured image:</p>
+                <img src={facePreview} alt="Face template" className="h-20 w-28 rounded-xl object-cover border border-steel/15 shadow-sm" />
               </div>
             )}
           </div>
@@ -237,11 +237,11 @@ export default function AttendancePanel({ token, profile }) {
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="rounded-lg bg-green-100 p-1.5"><span>📍</span></div>
-                <h3 className="font-semibold text-steel">Bước 3 — Vị trí GPS</h3>
-              </div>
-              <button type="button" onClick={refreshGPS} disabled={gpsLoading}
+              <h3 className="font-semibold text-steel">Step 3 — GPS Location</h3>
+            </div>
+            <button type="button" onClick={refreshGPS} disabled={gpsLoading}
                 className="rounded-lg bg-green-100 hover:bg-green-200 px-3 py-1.5 text-xs font-semibold text-green-700 transition disabled:opacity-50">
-                {gpsLoading ? "⏳ Đang lấy..." : "🔄 Cập nhật GPS"}
+                {gpsLoading ? "⏳ Getting location..." : "🔄 Refresh GPS"}
               </button>
             </div>
             {gpsCoords ? (
@@ -250,7 +250,7 @@ export default function AttendancePanel({ token, profile }) {
                 <p>📍 Lng: <strong>{gpsCoords.lng.toFixed(6)}</strong></p>
               </div>
             ) : (
-              <p className="text-sm text-graphite/50 italic">GPS sẽ được lấy tự động khi chấm công</p>
+              <p className="text-sm text-graphite/50 italic">GPS is automatically captured during attendance</p>
             )}
           </div>
 
@@ -258,16 +258,16 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-emerald-100 p-1.5"><span>✅</span></div>
-              <h3 className="font-semibold text-steel">Bước 4 — Xác nhận chấm công</h3>
+              <h3 className="font-semibold text-steel">Step 4 — Confirm Attendance</h3>
             </div>
             <div className="flex gap-3">
               <button type="button" onClick={() => submitAttendance("in")}
                 className="flex-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 py-3 text-sm font-bold text-white transition shadow-sm">
-                ▶ Vào ca
+                ▶ Check-in
               </button>
               <button type="button" onClick={() => submitAttendance("out")}
                 className="flex-1 rounded-xl bg-graphite hover:bg-graphite/90 py-3 text-sm font-bold text-white transition shadow-sm">
-                ■ Ra ca
+                ■ Check-out
               </button>
             </div>
           </div>
@@ -276,13 +276,13 @@ export default function AttendancePanel({ token, profile }) {
         {/* Right: camera feed + guide */}
         <div className="flex flex-col gap-4">
           <div className="rounded-2xl border border-steel/15 bg-white p-3 shadow-soft">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-graphite/50">Camera trực tiếp</p>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-graphite/50">Live camera</p>
             <div className="aspect-video overflow-hidden rounded-xl bg-slate-900 flex items-center justify-center relative">
               <video ref={videoRef} autoPlay playsInline className={`h-full w-full object-cover ${streaming ? "" : "hidden"}`} />
               {!streaming && (
                 <div className="text-center text-slate-500 absolute">
                   <div className="text-5xl mb-2">📷</div>
-                  <p className="text-sm">Camera chưa bật</p>
+                  <p className="text-sm">Camera is off</p>
                 </div>
               )}
               <canvas ref={canvasRef} className="hidden" />
@@ -290,17 +290,18 @@ export default function AttendancePanel({ token, profile }) {
           </div>
 
           <div className="rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 p-5 text-white shadow-lg">
-            <h3 className="font-bold text-lg mb-3">📋 Hướng dẫn chấm công</h3>
+            <h3 className="font-bold text-lg mb-3">📋 Attendance Guide</h3>
             <ol className="space-y-2 text-sm text-indigo-100 list-decimal list-inside">
-              <li>Chọn công trình đang làm việc</li>
-              <li>Bật camera và chụp ảnh khuôn mặt</li>
-              <li>Kiểm tra / cập nhật vị trí GPS (tùy chọn)</li>
-              <li>Nhấn <strong className="text-white">▶ Vào ca</strong> hoặc <strong className="text-white">■ Ra ca</strong></li>
+              <li>Select your assigned project</li>
+              <li>Enable camera and capture face template</li>
+              <li>Check or update GPS coordinates (optional)</li>
+              <li>Press <strong className="text-white">▶ Check-in</strong> or <strong className="text-white">■ Check-out</strong></li>
             </ol>
-            <p className="mt-3 text-xs text-indigo-200">* Vị trí GPS được ghi lại tự động khi xác nhận chấm công</p>
+            <p className="mt-3 text-xs text-indigo-200">* GPS will be recorded automatically when attendance is confirmed</p>
           </div>
         </div>
       </div>
     </section>
   );
 }
+

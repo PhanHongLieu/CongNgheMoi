@@ -19,6 +19,7 @@ const pool = new Pool({
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
+const DEFAULT_NEW_USER_PASSWORD = "123456";
 
 app.use(helmet());
 app.use(cors());
@@ -59,6 +60,52 @@ function authorize(...roles) {
   };
 }
 
+async function generateEmployeeCode() {
+  const result = await pool.query(
+    `SELECT MAX(CAST(SUBSTRING(employee_code FROM POSITION('-' IN employee_code) + 1) AS INTEGER)) as max_num
+     FROM users
+     WHERE employee_code ~ '^[A-Z]+-[0-9]+$'`
+  );
+
+  const maxNum = result.rows[0]?.max_num || 0;
+  const newNum = Number(maxNum) + 1;
+  return `USR-${String(newNum).padStart(3, "0")}`;
+}
+
+function normalizeBirthDate(input) {
+  if (input === undefined) {
+    return undefined;
+  }
+  if (input === null || input === "") {
+    return null;
+  }
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) {
+    return NaN;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeNameInput(firstName, lastName, fullName) {
+  const fn = String(firstName || "").trim();
+  const ln = String(lastName || "").trim();
+  if (fn || ln) {
+    return { firstName: fn, lastName: ln };
+  }
+
+  const legacy = String(fullName || "").trim();
+  if (!legacy) {
+    return { firstName: "", lastName: "" };
+  }
+
+  const parts = legacy.split(/\s+/);
+  const detectedFirstName = parts.pop() || "";
+  return {
+    firstName: detectedFirstName,
+    lastName: parts.join(" ").trim()
+  };
+}
+
 app.get("/health", (req, res) => {
   res.json({ service: "user-service", status: "ok" });
 });
@@ -66,7 +113,22 @@ app.get("/health", (req, res) => {
 app.get("/users", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT id, employee_code, full_name, phone, email, role, position, department, created_at, updated_at FROM users ORDER BY id DESC"
+      `SELECT u.id,
+              u.employee_code,
+              u.first_name,
+              u.last_name,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
+              u.phone,
+              u.email,
+              a.role,
+              u.gender,
+              u.birth_date,
+              u.address,
+              u.created_at,
+              u.updated_at
+       FROM users u
+       LEFT JOIN accounts a ON a.user_id = u.id
+       ORDER BY u.id DESC`
     );
 
     await writeDataLog({
@@ -91,7 +153,23 @@ app.get("/users/:id", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      "SELECT id, employee_code, full_name, phone, email, role, position, department, face_template, created_at, updated_at FROM users WHERE id = $1",
+      `SELECT u.id,
+              u.employee_code,
+              u.first_name,
+              u.last_name,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
+              u.phone,
+              u.email,
+              a.role,
+              u.gender,
+              u.birth_date,
+              u.address,
+              u.face_template,
+              u.created_at,
+              u.updated_at
+       FROM users u
+       LEFT JOIN accounts a ON a.user_id = u.id
+       WHERE u.id = $1`,
       [userId]
     );
     if (result.rowCount === 0) {
@@ -112,62 +190,125 @@ app.get("/users/:id", authenticate, async (req, res) => {
 });
 
 app.post("/users", authenticate, authorize("ADMIN"), async (req, res) => {
+  const client = await pool.connect();
   try {
     const {
-      employeeCode,
+      firstName,
+      lastName,
       fullName,
       phone,
       email,
-      password,
-      role,
-      position,
-      department,
+      gender,
+      birthDate,
+      address,
       faceTemplate
     } = req.body;
 
-    if (!employeeCode || !fullName || !email || !password || !role) {
-      return res.status(400).json({ message: "Missing required fields" });
+    const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
+    if (!normalizedNames.firstName || !normalizedNames.lastName || !email) {
+      return res.status(400).json({ message: "Missing required fields: firstName, lastName, email" });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
-    const result = await pool.query(
+    const normalizedBirthDate = normalizeBirthDate(birthDate);
+    if (Number.isNaN(normalizedBirthDate)) {
+      return res.status(400).json({ message: "birthDate is invalid" });
+    }
+
+    const employeeCode = await generateEmployeeCode();
+    const passwordHash = await bcrypt.hash(DEFAULT_NEW_USER_PASSWORD, 10);
+    const normalizedFullName = `${normalizedNames.lastName} ${normalizedNames.firstName}`.trim();
+
+    await client.query("BEGIN");
+    const insertedUser = await client.query(
       `INSERT INTO users (
-        employee_code, full_name, phone, email, password_hash, role, position, department, face_template
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-      RETURNING id, employee_code, full_name, phone, email, role, position, department, created_at`,
-      [employeeCode, fullName, phone || null, email, passwordHash, role, position || null, department || null, faceTemplate || null]
+        employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, face_template
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, created_at`,
+      [
+        employeeCode,
+        normalizedNames.firstName,
+        normalizedNames.lastName,
+        normalizedFullName,
+        phone || null,
+        email,
+        gender || null,
+        normalizedBirthDate,
+        address || null,
+        faceTemplate || null
+      ]
     );
+
+    await client.query(
+      `INSERT INTO accounts (user_id, role, password_hash, account_status, password_changed_at)
+       VALUES ($1, 'EMPLOYEE', $2, 'ACTIVE', NOW())
+       ON CONFLICT (user_id) DO NOTHING`,
+      [insertedUser.rows[0].id, passwordHash]
+    );
+
+    await client.query("COMMIT");
 
     await writeDataLog({
       action: "create",
       collection: "user",
-      recordId: String(result.rows[0].id),
+      recordId: String(insertedUser.rows[0].id),
       username: req.user.email,
-      metadata: { email: result.rows[0].email, role: result.rows[0].role }
+      metadata: {
+        email: insertedUser.rows[0].email,
+        role: "EMPLOYEE",
+        employeeCode: insertedUser.rows[0].employee_code,
+        defaultPassword: true
+      }
     });
 
-    return res.status(201).json(result.rows[0]);
+    return res.status(201).json({
+      ...insertedUser.rows[0],
+      role: "EMPLOYEE",
+      accountCreated: true,
+      defaultPassword: DEFAULT_NEW_USER_PASSWORD
+    });
   } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "Email already exists" });
+    }
     return res.status(500).json({ message: "Failed to create user", error: error.message });
+  } finally {
+    client.release();
   }
 });
 
-app.put("/users/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.put("/users/:id", authenticate, authorize("ADMIN", "MANAGER", "EMPLOYEE"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
-    const { fullName, phone, email, position, department, faceTemplate } = req.body;
+    if (req.user.role === "EMPLOYEE" && req.user.sub !== userId) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    const { firstName, lastName, fullName, phone, email, gender, birthDate, address, faceTemplate } = req.body;
+
+    const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
+    const nextFirstName = normalizedNames.firstName || undefined;
+    const nextLastName = normalizedNames.lastName || undefined;
+
+    const normalizedBirthDate = normalizeBirthDate(birthDate);
+    if (Number.isNaN(normalizedBirthDate)) {
+      return res.status(400).json({ message: "birthDate is invalid" });
+    }
+
     const result = await pool.query(
       `UPDATE users
-       SET full_name = COALESCE($1, full_name),
-           phone = COALESCE($2, phone),
-           email = COALESCE($3, email),
-           position = COALESCE($4, position),
-           department = COALESCE($5, department),
-           face_template = COALESCE($6, face_template),
+       SET first_name = COALESCE($1, first_name),
+           last_name = COALESCE($2, last_name),
+           full_name = TRIM(CONCAT_WS(' ', COALESCE($2::text, last_name), COALESCE($1::text, first_name))),
+           phone = COALESCE($3, phone),
+           email = COALESCE($4, email),
+           gender = COALESCE($5, gender),
+           birth_date = COALESCE($6, birth_date),
+           address = COALESCE($7, address),
+           face_template = COALESCE($8, face_template),
            updated_at = NOW()
-       WHERE id = $7
-       RETURNING id, employee_code, full_name, phone, email, role, position, department, updated_at`,
-      [fullName, phone, email, position, department, faceTemplate, userId]
+       WHERE id = $9
+       RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, updated_at`,
+      [nextFirstName, nextLastName, phone, email, gender, normalizedBirthDate, address, faceTemplate, userId]
     );
 
     if (result.rowCount === 0) {
@@ -180,7 +321,7 @@ app.put("/users/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, r
       recordId: String(userId),
       username: req.user.email,
       metadata: {
-        changedFields: ["fullName", "phone", "email", "position", "department", "faceTemplate"].filter(
+        changedFields: ["firstName", "lastName", "phone", "email", "gender", "birthDate", "address", "faceTemplate"].filter(
           (field) => req.body[field] !== undefined
         )
       }
@@ -188,30 +329,49 @@ app.put("/users/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, r
 
     return res.json(result.rows[0]);
   } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "Email already exists" });
+    }
     return res.status(500).json({ message: "Failed to update user", error: error.message });
   }
 });
 
 app.delete("/users/:id", authenticate, authorize("ADMIN"), async (req, res) => {
+  const client = await pool.connect();
   try {
     const userId = Number(req.params.id);
-    const target = await pool.query("SELECT email FROM users WHERE id = $1", [userId]);
-    const result = await pool.query("DELETE FROM users WHERE id = $1", [userId]);
-    if (result.rowCount === 0) {
+    const target = await client.query("SELECT email FROM users WHERE id = $1", [userId]);
+    if (target.rowCount === 0) {
       return res.status(404).json({ message: "User not found" });
     }
+
+    await client.query("BEGIN");
+    await client.query("DELETE FROM accounts WHERE user_id = $1", [userId]);
+    const result = await client.query("DELETE FROM users WHERE id = $1", [userId]);
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
+    await client.query("COMMIT");
 
     await writeDataLog({
       action: "delete",
       collection: "user",
       recordId: String(userId),
       username: req.user.email,
-      metadata: { deletedEmail: target.rows[0]?.email || null }
+      metadata: { deletedEmail: target.rows[0]?.email || null, deletedAccount: true }
     });
 
     return res.json({ message: "User deleted" });
   } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // ignore rollback errors
+    }
     return res.status(500).json({ message: "Failed to delete user", error: error.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -228,7 +388,7 @@ app.put("/users/:id/face-template", authenticate, authorize("ADMIN", "MANAGER", 
     }
 
     const result = await pool.query(
-      "UPDATE users SET face_template = $1, updated_at = NOW() WHERE id = $2 RETURNING id, full_name, face_template",
+      "UPDATE users SET face_template = $1, updated_at = NOW() WHERE id = $2 RETURNING id, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', last_name, first_name)), ''), full_name) AS full_name, face_template",
       [faceTemplate, userId]
     );
 
@@ -246,6 +406,63 @@ app.put("/users/:id/face-template", authenticate, authorize("ADMIN", "MANAGER", 
     return res.json({ message: "Face template updated", user: result.rows[0] });
   } catch (error) {
     return res.status(500).json({ message: "Failed to update face template", error: error.message });
+  }
+});
+
+app.get("/salary", authenticate, authorize("EMPLOYEE"), async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const currentMonth = month ? Number(month) : new Date().getMonth() + 1;
+    const currentYear = year ? Number(year) : new Date().getFullYear();
+
+    const result = await pool.query(
+      `SELECT s.*, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name, u.employee_code
+       FROM salaries s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.user_id = $1 AND s.month = $2 AND s.year = $3
+       ORDER BY s.created_at DESC`,
+      [req.user.sub, currentMonth, currentYear]
+    );
+
+    await writeDataLog({
+      action: "read",
+      collection: "salary",
+      recordId: `${req.user.sub}-${currentMonth}-${currentYear}`,
+      username: req.user.email,
+      metadata: { month: currentMonth, year: currentYear, count: result.rows.length }
+    });
+
+    return res.json(result.rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch salary", error: error.message });
+  }
+});
+
+app.get("/salary/history", async (req, res) => {
+  try {
+    const userResult = await pool.query("SELECT id FROM users WHERE email = $1", ["worker@mdp.local"]);
+    const userId = userResult.rows[0]?.id;
+
+    const result = await pool.query(
+      `SELECT s.*, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name, u.employee_code
+       FROM salaries s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.user_id = $1
+       ORDER BY s.year DESC, s.month DESC`,
+      [userId]
+    );
+
+    await writeDataLog({
+      action: "read",
+      collection: "salary-history",
+      recordId: String(userId),
+      username: "worker@mdp.local",
+      metadata: { count: result.rows.length }
+    });
+
+    return res.json(result.rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch salary history", error: error.message });
   }
 });
 

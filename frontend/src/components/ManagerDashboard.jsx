@@ -24,7 +24,7 @@ export default function ManagerDashboard({ token, profile }) {
   const [projects, setProjects] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [locations, setLocations] = useState([]);
-  const [status, setStatus] = useState("Đang tải dashboard manager...");
+  const [status, setStatus] = useState("Loading manager dashboard...");
 
   const [newProject, setNewProject] = useState({
     projectCode: "",
@@ -43,7 +43,7 @@ export default function ManagerDashboard({ token, profile }) {
 
   const loadData = useCallback(async () => {
     try {
-      setStatus("Đang đồng bộ dữ liệu manager...");
+      setStatus("Syncing manager data...");
       const [projectData, userData, locationData] = await Promise.all([
         request("/projects", token),
         request("/users", token),
@@ -60,9 +60,9 @@ export default function ManagerDashboard({ token, profile }) {
         projectId: prev.projectId || (projectList[0]?.id ? String(projectList[0].id) : ""),
         userId: prev.userId || (userList.find((u) => u.role === "EMPLOYEE")?.id ? String(userList.find((u) => u.role === "EMPLOYEE").id) : "")
       }));
-      setStatus("Sẵn sàng");
+      setStatus("Ready");
     } catch (error) {
-      setStatus(`Không thể tải dashboard manager: ${error.message}`);
+      setStatus(`Unable to load manager dashboard: ${error.message}`);
     }
   }, [token]);
 
@@ -81,18 +81,18 @@ export default function ManagerDashboard({ token, profile }) {
         longitude: Number(newProject.longitude),
         status: "IN_PROGRESS"
       });
-      setStatus(`Đã tạo công trình ${created.project_code}`);
+      setStatus(`Project created: ${created.project_code}`);
       setNewProject({ projectCode: "", name: "", latitude: "10.7769", longitude: "106.7009" });
       loadData();
     } catch (error) {
-      setStatus(`Tạo công trình thất bại: ${error.message}`);
+      setStatus(`Project creation failed: ${error.message}`);
     }
   };
 
   const createAssignment = async () => {
     try {
       if (!assignment.projectId || !assignment.userId) {
-        setStatus("Can chọn công trình và nhân viên");
+        setStatus("Please select project and employee");
         return;
       }
       const created = await request("/projects/assignments", token, "POST", {
@@ -100,34 +100,34 @@ export default function ManagerDashboard({ token, profile }) {
         userId: Number(assignment.userId),
         assignmentRole: "Worker"
       });
-      setStatus(`Đã phân công thành công (assignment #${created.id})`);
+      setStatus(`Assignment created successfully (ID #${created.id})`);
     } catch (error) {
-      setStatus(`Phân công thất bại: ${error.message}`);
+      setStatus(`Assignment failed: ${error.message}`);
     }
   };
 
   const updateProgress = async () => {
     try {
       if (!selectedProject) {
-        setStatus("Can chọn công trình để cập nhật tiến độ");
+        setStatus("Please select a project to update progress");
         return;
       }
       await request(`/projects/${selectedProject}/progress`, token, "POST", {
         progressPercent: 50,
-        note: "Cập nhật nhanh tu dashboard manager"
+        note: "Quick progress update from manager dashboard"
       });
-      setStatus("Đã cập nhật tiến độ 50% cho công trình");
+      setStatus("Project progress updated to 50%");
     } catch (error) {
-      setStatus(`Cập nhật tiến độ thất bại: ${error.message}`);
+      setStatus(`Progress update failed: ${error.message}`);
     }
   };
 
   return (
     <section className="space-y-4 rounded-3xl bg-white/80 p-6 shadow-soft backdrop-blur">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-2xl font-bold text-steel">Bang dieu khien Manager</h2>
+        <h2 className="text-2xl font-bold text-steel">Manager Dashboard</h2>
         <span className="rounded-full bg-sand px-3 py-1 text-xs font-semibold text-graphite">
-          Xin chào {profile?.fullName}
+          Welcome, {profile?.fullName}
         </span>
       </div>
 
@@ -135,17 +135,17 @@ export default function ManagerDashboard({ token, profile }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <form onSubmit={createProject} className="space-y-3 rounded-2xl border border-steel/15 bg-white p-4">
-          <h3 className="text-lg font-semibold text-steel">Tạo công trình</h3>
+          <h3 className="text-lg font-semibold text-steel">Create New Project</h3>
           <input
             className="w-full rounded-xl border border-steel/20 px-3 py-2"
-            placeholder="Mã công trình"
+            placeholder="Project Code"
             value={newProject.projectCode}
             onChange={(event) => setNewProject((prev) => ({ ...prev, projectCode: event.target.value }))}
             required
           />
           <input
             className="w-full rounded-xl border border-steel/20 px-3 py-2"
-            placeholder="Tên công trình"
+            placeholder="Project Name"
             value={newProject.name}
             onChange={(event) => setNewProject((prev) => ({ ...prev, name: event.target.value }))}
             required
@@ -167,12 +167,12 @@ export default function ManagerDashboard({ token, profile }) {
             />
           </div>
           <button className="rounded-xl bg-steel px-4 py-2 text-sm font-semibold text-white" type="submit">
-            Tạo công trình
+            Create Project
           </button>
         </form>
 
         <section className="space-y-3 rounded-2xl border border-steel/15 bg-white p-4">
-          <h3 className="text-lg font-semibold text-steel">Phân công nhân viên</h3>
+          <h3 className="text-lg font-semibold text-steel">Assignment Management</h3>
           <select
             className="w-full rounded-xl border border-steel/20 px-3 py-2"
             value={assignment.projectId}
@@ -201,37 +201,38 @@ export default function ManagerDashboard({ token, profile }) {
               onClick={createAssignment}
               className="rounded-xl bg-copper px-4 py-2 text-sm font-semibold text-white"
             >
-              Phân công
+              Assign
             </button>
             <button
               type="button"
               onClick={updateProgress}
               className="rounded-xl bg-mint px-4 py-2 text-sm font-semibold text-white"
             >
-              Cập nhật tiến độ
+              Update Progress
             </button>
             <button
               type="button"
               onClick={loadData}
               className="rounded-xl bg-graphite px-4 py-2 text-sm font-semibold text-white"
             >
-              Tải lại
+              Reload
             </button>
           </div>
         </section>
       </div>
 
       <section className="rounded-2xl border border-steel/15 bg-white p-4">
-        <h3 className="mb-2 text-lg font-semibold text-steel">Vi tri nhân viên gần nhất</h3>
+        <h3 className="mb-2 text-lg font-semibold text-steel">Latest employee locations</h3>
         <div className="space-y-2 text-sm text-graphite">
           {locations.slice(0, 8).map((item) => (
             <p key={item.user_id}>
               {item.full_name} - {item.project_name} ({Number(item.latitude).toFixed(5)}, {Number(item.longitude).toFixed(5)})
             </p>
           ))}
-          {locations.length === 0 && <p>Chưa có dữ liệu vị trí.</p>}
+          {locations.length === 0 && <p>No location data available.</p>}
         </div>
       </section>
     </section>
   );
 }
+

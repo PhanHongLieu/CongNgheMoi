@@ -18,11 +18,11 @@ export default function AdminDashboard({ token, profile }) {
   const [users, setUsers] = useState([]);
   const [projects, setProjects] = useState([]);
   const [hrSummary, setHrSummary] = useState([]);
-  const [status, setStatus] = useState("Đang tải dữ liệu quản trị...");
+  const [status, setStatus] = useState("Loading admin dashboard...");
 
   const loadData = useCallback(async () => {
     try {
-      setStatus("Đang đồng bộ dữ liệu...");
+      setStatus("Syncing data...");
       const [usersData, projectsData, hrData] = await Promise.all([
         request("/users", token),
         request("/projects", token),
@@ -31,9 +31,9 @@ export default function AdminDashboard({ token, profile }) {
       setUsers(Array.isArray(usersData) ? usersData : []);
       setProjects(Array.isArray(projectsData) ? projectsData : []);
       setHrSummary(Array.isArray(hrData) ? hrData : []);
-      setStatus("Sẵn sàng");
+      setStatus("Ready");
     } catch (error) {
-      setStatus(`Không thể tải dashboard admin: ${error.message}`);
+      setStatus(`Unable to load admin dashboard: ${error.message}`);
     }
   }, [token]);
 
@@ -43,38 +43,38 @@ export default function AdminDashboard({ token, profile }) {
 
   const moduleCards = [
     {
-      title: "Quản lý tải khoan",
-      detảil: "Theo dõi tải khoan, cập nhật role và trạng thái sử dụng",
-      metric: `${users.length} tải khoan`
+      title: "Drill Data Management",
+      detail: "Track equipment loads, roles and usage status",
+      metric: `${users.length} load records`
     },
     {
-      title: "Quản lý nhân viên",
-      detảil: "CRUD nhân sự, cập nhật thong tin và mau khuôn mặt",
-      metric: `${users.filter((u) => u.role === "EMPLOYEE").length} nhân viên`
+      title: "Employee Management",
+      detail: "CRUD employees, update information and face model",
+      metric: `${users.filter((u) => u.role === "EMPLOYEE").length} employees`
     },
     {
-      title: "Quản lý công trình",
-      detảil: "Theo dõi danh sách công trình và trạng thái triển khai",
-      metric: `${projects.length} công trình`
+      title: "Project Management",
+      detail: "Monitor projects list and deployment status",
+      metric: `${projects.length} projects`
     },
     {
-      title: "Báo cáo tổng hợp",
-      detảil: "Thong ke attendance, nhân sự và tiến độ thi cong",
-      metric: `${hrSummary.length} bản ghi báo cáo`
+      title: "Reporting Summary",
+      detail: "Stats for attendance, workforce and progress",
+      metric: `${hrSummary.length} report entries`
     },
     {
-      title: "Quản lý phan quyen",
-      detảil: "Dieu chinh role ADMIN / MANAGER / EMPLOYEE",
-      metric: `${users.filter((u) => u.role === "MANAGER").length} manager`
+      title: "Permissions Management",
+      detail: "Adjust roles: ADMIN / MANAGER / EMPLOYEE",
+      metric: `${users.filter((u) => u.role === "MANAGER").length} managers`
     }
   ];
 
   return (
     <section className="space-y-4 rounded-3xl bg-white/80 p-6 shadow-soft backdrop-blur">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-2xl font-bold text-steel">Bang dieu khien Admin</h2>
+        <h2 className="text-2xl font-bold text-steel">Admin Dashboard</h2>
         <span className="rounded-full bg-sand px-3 py-1 text-xs font-semibold text-graphite">
-          Xin chào {profile?.fullName}
+          Welcome, {profile?.fullName}
         </span>
       </div>
 
@@ -84,7 +84,7 @@ export default function AdminDashboard({ token, profile }) {
         {moduleCards.map((card) => (
           <article key={card.title} className="rounded-2xl border border-steel/15 bg-white p-4">
             <h3 className="text-lg font-semibold text-steel">{card.title}</h3>
-            <p className="mt-1 text-sm text-graphite/80">{card.detảil}</p>
+            <p className="mt-1 text-sm text-graphite/80">{card.detail}</p>
             <p className="mt-3 inline-block rounded-full bg-copper/10 px-3 py-1 text-xs font-semibold text-copper">
               {card.metric}
             </p>
@@ -94,26 +94,26 @@ export default function AdminDashboard({ token, profile }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-2xl border border-steel/15 bg-white p-4">
-          <h3 className="mb-2 text-lg font-semibold text-steel">Nhân viên gan day</h3>
+          <h3 className="mb-2 text-lg font-semibold text-steel">Recent Employees</h3>
           <div className="space-y-2 text-sm text-graphite">
             {users.slice(0, 5).map((user) => (
               <p key={user.id}>
                 {user.employee_code} - {user.full_name} ({user.role})
               </p>
             ))}
-            {users.length === 0 && <p>Chưa có dữ liệu nhân viên.</p>}
+            {users.length === 0 && <p>No employee data available.</p>}
           </div>
         </section>
 
         <section className="rounded-2xl border border-steel/15 bg-white p-4">
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-steel">Công trình</h3>
+            <h3 className="text-lg font-semibold text-steel">Projects</h3>
             <button
               type="button"
               onClick={loadData}
               className="rounded-xl bg-steel px-3 py-1 text-xs font-semibold text-white"
             >
-              Tải lại
+              Reload
             </button>
           </div>
           <div className="space-y-2 text-sm text-graphite">
@@ -122,10 +122,11 @@ export default function AdminDashboard({ token, profile }) {
                 {project.project_code} - {project.name} ({project.status})
               </p>
             ))}
-            {projects.length === 0 && <p>Chưa có dữ liệu công trình.</p>}
+            {projects.length === 0 && <p>No project data available.</p>}
           </div>
         </section>
       </div>
     </section>
   );
 }
+
