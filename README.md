@@ -39,6 +39,11 @@ docker compose up --build
 - Frontend: http://localhost:5173
 - API Gateway: http://localhost:8080
 
+4. Cai model cho `face-api.js`:
+
+- Dat cac file model vao thu muc `frontend/public/models`.
+- Danh sach file can co: xem `frontend/public/models/README.md`.
+
 ## Docker Logs
 
 - Xem log tat ca service:
@@ -82,7 +87,7 @@ docker compose logs -f attendance-service
    - Kiểm tra assignment nhân viên thuoc công trình
    - So sánh GPS với tọa độ công trình bảng Haversine
    - Tu choi neu khoang cach >= 100m
-   - So khop khuôn mặt (MVP: hash compare; production: AWS Rekognition/FaceNet)
+   - So khop khuôn mặt bang embedding 128D (cosine similarity) + liveness head-turn
    - Luu bản ghi check-in/check-out
 
 ## AWS Deployment Suggestion

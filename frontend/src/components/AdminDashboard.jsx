@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = "http://localhost:8080/api";
 
@@ -64,8 +64,8 @@ export default function AdminDashboard({ token, profile }) {
     },
     {
       title: "Permissions Management",
-      detail: "Adjust roles: ADMIN / MANAGER / EMPLOYEE",
-      metric: `${users.filter((u) => u.role === "MANAGER").length} managers`
+      detail: "Adjust roles: ADMIN / HR_MANAGER / PROJECT_MANAGER / EMPLOYEE",
+      metric: `${users.filter((u) => u.role === "PROJECT_MANAGER").length} managers`
     }
   ];
 
@@ -129,4 +129,5 @@ export default function AdminDashboard({ token, profile }) {
     </section>
   );
 }
+
 

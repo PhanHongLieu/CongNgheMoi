@@ -130,7 +130,7 @@ app.get("/schedule", authenticate, authorize("EMPLOYEE"), async (req, res) => {
   }
 });
 
-app.post("/projects", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const {
       projectCode,
@@ -168,7 +168,7 @@ app.post("/projects", authenticate, authorize("ADMIN", "MANAGER"), async (req, r
   }
 });
 
-app.put("/projects/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const { name, address, latitude, longitude, startDate, endDate, status } = req.body;
@@ -210,7 +210,7 @@ app.put("/projects/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req
   }
 });
 
-app.delete("/projects/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.delete("/projects/:id", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const target = await pool.query("SELECT project_code FROM projects WHERE id = $1", [projectId]);
@@ -261,7 +261,7 @@ app.get("/projects/:id/assignments", authenticate, async (req, res) => {
   }
 });
 
-app.post("/projects/assignments", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const { userId, projectId, assignmentRole, workStart, workEnd } = req.body;
     if (!userId || !projectId) {
@@ -294,7 +294,7 @@ app.post("/projects/assignments", authenticate, authorize("ADMIN", "MANAGER"), a
   }
 });
 
-app.delete("/projects/assignments/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.delete("/projects/assignments/:id", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const assignmentId = Number(req.params.id);
     const target = await pool.query("SELECT user_id, project_id FROM project_assignments WHERE id = $1", [assignmentId]);
@@ -320,7 +320,7 @@ app.delete("/projects/assignments/:id", authenticate, authorize("ADMIN", "MANAGE
   }
 });
 
-app.post("/projects/:id(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/:id(\\d+)/progress", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const { progressPercent, note } = req.body;
@@ -372,7 +372,7 @@ app.post("/projects/:id(\\d+)/progress", authenticate, authorize("ADMIN", "MANAG
   }
 });
 
-app.get("/projects/:id(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.get("/projects/:id(\\d+)/progress", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const result = await pool.query(
@@ -398,7 +398,7 @@ app.get("/projects/:id(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGE
   }
 });
 
-app.get("/projects/reports/progress", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.get("/projects/reports/progress", authenticate, authorize("PROJECT_MANAGER"), async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT p.id, p.project_code, p.name, p.status,
@@ -432,3 +432,4 @@ app.get("/projects/reports/progress", authenticate, authorize("ADMIN", "MANAGER"
 app.listen(port, () => {
   console.log(`project-service listening on ${port}`);
 });
+
