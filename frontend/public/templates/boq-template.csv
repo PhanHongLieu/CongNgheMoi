@@ -1,0 +1,6 @@
+itemType,stageId,wbsCode,parentWbsCode,dependencyWbsCode,dependencyType,itemName,unit,quantity,unitCost,plannedDate,plannedEndDate,actualDate,actualEndDate,status
+BOQ,1,1.1,,,FS,Ep coc dai tra,m,320,185000,2026-04-02,2026-04-08,,,PLANNED
+BOQ,1,1.2,1.1,1.1,FS,Dao dat mong,m3,1450,98000,2026-04-09,2026-04-15,2026-04-10,2026-04-12,IN_PROGRESS
+PLAN,2,2.1,1.2,1.2,FS,Do be tong lot,m3,120,1350000,2026-04-18,2026-04-20,,,PLANNED
+PLAN,2,2.2,2.1,2.1,SS,Lap dat cot thep mong,kg,28500,18200,2026-04-22,2026-04-28,2026-04-22,2026-04-25,IN_PROGRESS
+PLAN,3,3.1,2.2,2.2,FF,Do be tong dai mong,m3,410,1520000,2026-05-02,2026-05-08,,,PLANNED

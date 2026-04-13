@@ -13,9 +13,14 @@ async function request(path, token, method = "GET", body) {
   });
 
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
   if (!response.ok) {
-    throw new Error(data?.message || "Request failed");
+    throw new Error((data && data.message) || text || "Request failed");
   }
   return data;
 }
@@ -24,7 +29,8 @@ export default function ManagerDashboard({ token, profile }) {
   const [projects, setProjects] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [locations, setLocations] = useState([]);
-  const [status, setStatus] = useState("Loading manager dashboard...");
+  const [assignmentStages, setAssignmentStages] = useState([]);
+  const [status, setStatus] = useState("Loading dashboard manager...");
 
   const [newProject, setNewProject] = useState({
     projectCode: "",
@@ -32,7 +38,7 @@ export default function ManagerDashboard({ token, profile }) {
     latitude: "10.7769",
     longitude: "106.7009"
   });
-  const [assignment, setAssignment] = useState({ projectId: "", userId: "" });
+  const [assignment, setAssignment] = useState({ projectId: "", stageId: "", userId: "" });
 
   const selectedProject = useMemo(() => {
     if (!assignment.projectId) {
@@ -43,7 +49,7 @@ export default function ManagerDashboard({ token, profile }) {
 
   const loadData = useCallback(async () => {
     try {
-      setStatus("Syncing manager data...");
+      setStatus("Syncing data manager...");
       const [projectData, userData, locationData] = await Promise.all([
         request("/projects", token),
         request("/users", token),
@@ -58,17 +64,46 @@ export default function ManagerDashboard({ token, profile }) {
 
       setAssignment((prev) => ({
         projectId: prev.projectId || (projectList[0]?.id ? String(projectList[0].id) : ""),
+        stageId: prev.stageId || "",
         userId: prev.userId || (userList.find((u) => u.role === "EMPLOYEE")?.id ? String(userList.find((u) => u.role === "EMPLOYEE").id) : "")
       }));
       setStatus("Ready");
     } catch (error) {
-      setStatus(`Unable to load manager dashboard: ${error.message}`);
+      setStatus(`Unable to load dashboard manager: ${error.message}`);
     }
   }, [token]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    const loadStages = async () => {
+      if (!assignment.projectId) {
+        setAssignmentStages([]);
+        setAssignment((prev) => ({ ...prev, stageId: "" }));
+        return;
+      }
+
+      try {
+        const stageData = await request(`/projects/${assignment.projectId}/stages`, token);
+        const stageList = Array.isArray(stageData) ? stageData : [];
+        setAssignmentStages(stageList);
+        setAssignment((prev) => {
+          const exists = stageList.some((stage) => String(stage.id) === String(prev.stageId));
+          return {
+            ...prev,
+            stageId: exists ? prev.stageId : stageList[0]?.id ? String(stageList[0].id) : ""
+          };
+        });
+      } catch (error) {
+        setAssignmentStages([]);
+        setStatus(`Unable to load list stage: ${error.message}`);
+      }
+    };
+
+    loadStages();
+  }, [assignment.projectId, token]);
 
   const createProject = async (event) => {
     event.preventDefault();
@@ -81,26 +116,27 @@ export default function ManagerDashboard({ token, profile }) {
         longitude: Number(newProject.longitude),
         status: "IN_PROGRESS"
       });
-      setStatus(`Project created: ${created.project_code}`);
+      setStatus(`Created project: ${created.project_code}`);
       setNewProject({ projectCode: "", name: "", latitude: "10.7769", longitude: "106.7009" });
       loadData();
     } catch (error) {
-      setStatus(`Project creation failed: ${error.message}`);
+      setStatus(`Create Project failed: ${error.message}`);
     }
   };
 
   const createAssignment = async () => {
     try {
-      if (!assignment.projectId || !assignment.userId) {
-        setStatus("Please select project and employee");
+      if (!assignment.projectId || !assignment.stageId || !assignment.userId) {
+        setStatus("Please select a project, stage, and employee");
         return;
       }
       const created = await request("/projects/assignments", token, "POST", {
         projectId: Number(assignment.projectId),
+        stageId: Number(assignment.stageId),
         userId: Number(assignment.userId),
         assignmentRole: "Worker"
       });
-      setStatus(`Assignment created successfully (ID #${created.id})`);
+      setStatus(`Created assignment successful (ID #${created.id})`);
     } catch (error) {
       setStatus(`Assignment failed: ${error.message}`);
     }
@@ -118,7 +154,7 @@ export default function ManagerDashboard({ token, profile }) {
       });
       setStatus("Project progress updated to 50%");
     } catch (error) {
-      setStatus(`Progress update failed: ${error.message}`);
+      setStatus(`Update progress failed: ${error.message}`);
     }
   };
 
@@ -127,7 +163,7 @@ export default function ManagerDashboard({ token, profile }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-2xl font-bold text-steel">Manager Dashboard</h2>
         <span className="rounded-full bg-sand px-3 py-1 text-xs font-semibold text-graphite">
-          Welcome, {profile?.fullName}
+          Hello, {profile?.fullName || profile?.full_name || profile?.email || "Manager"}
         </span>
       </div>
 
@@ -180,9 +216,24 @@ export default function ManagerDashboard({ token, profile }) {
           >
             {projects.map((project) => (
               <option key={project.id} value={project.id}>
-                {project.project_code} - {project.name}
+                {project.project_code || project.projectCode} - {project.name}
               </option>
             ))}
+          </select>
+          <select
+            className="w-full rounded-xl border border-steel/20 px-3 py-2"
+            value={assignment.stageId}
+            onChange={(event) => setAssignment((prev) => ({ ...prev, stageId: event.target.value }))}
+          >
+            {assignmentStages.length === 0 ? (
+              <option value="">No stages available</option>
+            ) : (
+              assignmentStages.map((stage) => (
+                <option key={stage.id} value={stage.id}>
+                  {stage.stage_order}. {stage.stage_name} ({stage.status || "NOT_STARTED"})
+                </option>
+              ))
+            )}
           </select>
           <select
             className="w-full rounded-xl border border-steel/20 px-3 py-2"
@@ -208,7 +259,7 @@ export default function ManagerDashboard({ token, profile }) {
               onClick={updateProgress}
               className="rounded-xl bg-mint px-4 py-2 text-sm font-semibold text-white"
             >
-              Update Progress
+              Update progress
             </button>
             <button
               type="button"
@@ -226,7 +277,7 @@ export default function ManagerDashboard({ token, profile }) {
         <div className="space-y-2 text-sm text-graphite">
           {locations.slice(0, 8).map((item) => (
             <p key={item.user_id}>
-              {item.full_name} - {item.project_name} ({Number(item.latitude).toFixed(5)}, {Number(item.longitude).toFixed(5)})
+              {item.full_name || item.fullName || "-"} - {item.project_name || item.projectName || "-"} ({Number(item.latitude || 0).toFixed(5)}, {Number(item.longitude || 0).toFixed(5)})
             </p>
           ))}
           {locations.length === 0 && <p>No location data available.</p>}
@@ -235,4 +286,18 @@ export default function ManagerDashboard({ token, profile }) {
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

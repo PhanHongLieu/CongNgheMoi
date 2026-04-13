@@ -12,6 +12,18 @@ function emitToast(type, message) {
   );
 }
 
+function emitAuthInvalid(message) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent("app:auth-invalid", {
+      detail: { message }
+    })
+  );
+}
+
 export async function apiRequest(path, token, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const shouldToast = options.toast !== false && method !== "GET";
@@ -41,6 +53,9 @@ export async function apiRequest(path, token, options = {}) {
 
   if (!response.ok) {
     const message = (data && data.message) || raw || "Request failed";
+    if (response.status === 401) {
+      emitAuthInvalid(message);
+    }
     if (shouldToast) {
       emitToast("error", message);
     }
@@ -48,7 +63,7 @@ export async function apiRequest(path, token, options = {}) {
   }
 
   if (shouldToast) {
-    const successMessage = options.successMessage || (data && data.message) || "Operation successful";
+    const successMessage = options.successMessage || (data && data.message) || "Operation completed successfully";
     emitToast("success", successMessage);
   }
 
@@ -56,3 +71,5 @@ export async function apiRequest(path, token, options = {}) {
 }
 
 export { API_BASE };
+
+

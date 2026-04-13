@@ -101,3 +101,4 @@ docker compose logs -f attendance-service
 - Helmet + CORS + input validation
 - RBAC middleware tải mỗi service
 - Bat buoc HTTPS tren production
+

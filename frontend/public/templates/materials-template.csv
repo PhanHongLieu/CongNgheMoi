@@ -1,0 +1,6 @@
+materialName,unit,plannedQty,receivedQty,usedQty,unitCost,supplier,status,note
+Xi mang PCB40,bao,2500,1800,1650,87000,Holcim Vietnam,IN_PROGRESS,Goi 1 khu A
+Thep D16,kg,62000,41000,36500,16750,Hoa Phat,IN_PROGRESS,Can bo sung truoc 2026-05-10
+Cat vang,m3,980,750,690,285000,Tan Cang Materials,IN_PROGRESS,Da dat lich giao dot 3
+Da 1x2,m3,1250,920,840,365000,VLXD Binh Duong,IN_PROGRESS,Phuc vu be tong mong
+Ong PVC D90,m,1800,600,420,32500,Binh Minh Plastics,PLANNED,Cho he thong thoat nuoc

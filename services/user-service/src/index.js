@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -106,6 +106,43 @@ function normalizeNameInput(firstName, lastName, fullName) {
   };
 }
 
+async function ensureHrTables() {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS employee_contracts (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      contract_code VARCHAR(80) UNIQUE NOT NULL,
+      contract_type VARCHAR(40) NOT NULL DEFAULT 'FULL_TIME',
+      start_date DATE NOT NULL,
+      end_date DATE,
+      base_salary NUMERIC(14,2) NOT NULL DEFAULT 0,
+      overtime_rate NUMERIC(14,2) NOT NULL DEFAULT 0,
+      status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('DRAFT', 'ACTIVE', 'EXPIRED', 'TERMINATED')),
+      notes TEXT,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
+
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS leave_requests (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      leave_type VARCHAR(30) NOT NULL DEFAULT 'ANNUAL',
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      reason TEXT,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
+      approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      approved_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
+}
+
 app.get("/health", (req, res) => {
   res.json({ service: "user-service", status: "ok" });
 });
@@ -141,7 +178,7 @@ app.get("/users", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) 
 
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch users", error: error.message });
+    res.status(500).json({ message: "Failed to load người dùngs", error: error.message });
   }
 });
 
@@ -185,7 +222,7 @@ app.get("/users/:id", authenticate, async (req, res) => {
 
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch user", error: error.message });
+    return res.status(500).json({ message: "Failed to load người dùng", error: error.message });
   }
 });
 
@@ -206,7 +243,7 @@ app.post("/users", authenticate, authorize("ADMIN"), async (req, res) => {
 
     const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
     if (!normalizedNames.firstName || !normalizedNames.lastName || !email) {
-      return res.status(400).json({ message: "Missing required fields: firstName, lastName, email" });
+      return res.status(400).json({ message: "Thiếu trường bắt buộc: firstName, lastName, email" });
     }
 
     const normalizedBirthDate = normalizeBirthDate(birthDate);
@@ -271,7 +308,7 @@ app.post("/users", authenticate, authorize("ADMIN"), async (req, res) => {
     if (error.code === "23505") {
       return res.status(409).json({ message: "Email already exists" });
     }
-    return res.status(500).json({ message: "Failed to create user", error: error.message });
+    return res.status(500).json({ message: "Failed to create người dùng", error: error.message });
   } finally {
     client.release();
   }
@@ -332,7 +369,7 @@ app.put("/users/:id", authenticate, authorize("ADMIN", "MANAGER", "EMPLOYEE"), a
     if (error.code === "23505") {
       return res.status(409).json({ message: "Email already exists" });
     }
-    return res.status(500).json({ message: "Failed to update user", error: error.message });
+    return res.status(500).json({ message: "Failed to update người dùng", error: error.message });
   }
 });
 
@@ -362,7 +399,7 @@ app.delete("/users/:id", authenticate, authorize("ADMIN"), async (req, res) => {
       metadata: { deletedEmail: target.rows[0]?.email || null, deletedAccount: true }
     });
 
-    return res.json({ message: "User deleted" });
+    return res.json({ message: "Đã xóa người dùng" });
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -384,7 +421,7 @@ app.put("/users/:id/face-template", authenticate, authorize("ADMIN", "MANAGER", 
 
     const { faceTemplate } = req.body;
     if (!faceTemplate) {
-      return res.status(400).json({ message: "faceTemplate is required" });
+      return res.status(400).json({ message: "faceTemplate là trường bắt buộc" });
     }
 
     const result = await pool.query(
@@ -403,9 +440,9 @@ app.put("/users/:id/face-template", authenticate, authorize("ADMIN", "MANAGER", 
       username: req.user.email
     });
 
-    return res.json({ message: "Face template updated", user: result.rows[0] });
+    return res.json({ message: "Mẫu khuôn mặt updated", user: result.rows[0] });
   } catch (error) {
-    return res.status(500).json({ message: "Failed to update face template", error: error.message });
+    return res.status(500).json({ message: "Failed to update mẫu khuôn mặt", error: error.message });
   }
 });
 
@@ -434,7 +471,7 @@ app.get("/salary", authenticate, authorize("EMPLOYEE"), async (req, res) => {
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch salary", error: error.message });
+    return res.status(500).json({ message: "Failed to load lương", error: error.message });
   }
 });
 
@@ -462,10 +499,304 @@ app.get("/salary/history", async (req, res) => {
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch salary history", error: error.message });
+    return res.status(500).json({ message: "Failed to load lịch sử lương", error: error.message });
   }
 });
 
-app.listen(port, () => {
-  console.log(`user-service listening on ${port}`);
+app.get("/users/hr/contracts", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.*, u.employee_code,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name
+       FROM employee_contracts c
+       JOIN users u ON u.id = c.user_id
+       ORDER BY c.created_at DESC`
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load hợp đồng lao động", error: error.message });
+  }
 });
+
+app.post("/users/hr/contracts", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const { userId, contractCode, contractType, startDate, endDate, baseSalary, overtimeRate, status, notes } = req.body;
+    if (!userId || !contractCode || !startDate) {
+      return res.status(400).json({ message: "userId, contractCode, startDate is required" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO employee_contracts
+       (user_id, contract_code, contract_type, start_date, end_date, base_salary, overtime_rate, status, notes, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+       RETURNING *`,
+      [
+        Number(userId),
+        String(contractCode).trim(),
+        contractType || "FULL_TIME",
+        startDate,
+        endDate || null,
+        Number(baseSalary || 0),
+        Number(overtimeRate || 0),
+        status || "ACTIVE",
+        notes || null,
+        req.user.sub
+      ]
+    );
+
+    return res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "Mã hợp đồng already exists" });
+    }
+    return res.status(500).json({ message: "Failed to create hợp đồng lao động", error: error.message });
+  }
+});
+
+app.put("/users/hr/contracts/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const contractId = Number(req.params.id);
+    const { contractCode, contractType, startDate, endDate, baseSalary, overtimeRate, status, notes } = req.body;
+
+    const result = await pool.query(
+      `UPDATE employee_contracts
+       SET contract_code = COALESCE($1, contract_code),
+           contract_type = COALESCE($2, contract_type),
+           start_date = COALESCE($3, start_date),
+           end_date = COALESCE($4, end_date),
+           base_salary = COALESCE($5, base_salary),
+           overtime_rate = COALESCE($6, overtime_rate),
+           status = COALESCE($7, status),
+           notes = COALESCE($8, notes),
+           updated_by = $9,
+           updated_at = NOW()
+       WHERE id = $10
+       RETURNING *`,
+      [
+        contractCode,
+        contractType,
+        startDate,
+        endDate,
+        baseSalary == null ? null : Number(baseSalary),
+        overtimeRate == null ? null : Number(overtimeRate),
+        status,
+        notes,
+        req.user.sub,
+        contractId
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update hợp đồng", error: error.message });
+  }
+});
+
+app.delete("/users/hr/contracts/:id", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const contractId = Number(req.params.id);
+    const result = await pool.query("DELETE FROM employee_contracts WHERE id = $1", [contractId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+    return res.json({ message: "Contract deleted" });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to delete hợp đồng", error: error.message });
+  }
+});
+
+app.get("/users/hr/leaves", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const { status } = req.query;
+    const params = [];
+    let whereClause = "";
+    if (status) {
+      params.push(status);
+      whereClause = "WHERE lr.status = $1";
+    }
+
+    const { rows } = await pool.query(
+      `SELECT lr.*, u.employee_code,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
+              approver.email AS approved_by_email
+       FROM leave_requests lr
+       JOIN users u ON u.id = lr.user_id
+       LEFT JOIN users approver ON approver.id = lr.approved_by
+       ${whereClause}
+       ORDER BY lr.created_at DESC`,
+      params
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load leave request", error: error.message });
+  }
+});
+
+app.post("/users/hr/leaves", authenticate, async (req, res) => {
+  try {
+    const { userId, leaveType, startDate, endDate, reason } = req.body;
+    const targetUserId = req.user.role === "EMPLOYEE" ? req.user.sub : Number(userId || req.user.sub);
+    if (!targetUserId || !startDate || !endDate) {
+      return res.status(400).json({ message: "userId, startDate, endDate is required" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO leave_requests
+       (user_id, leave_type, start_date, end_date, reason, status)
+       VALUES ($1,$2,$3,$4,$5,'PENDING')
+       RETURNING *`,
+      [targetUserId, leaveType || "ANNUAL", startDate, endDate, reason || null]
+    );
+
+    return res.status(201).json(result.rows[0]);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to create leave request", error: error.message });
+  }
+});
+
+app.put("/users/hr/leaves/:id/status", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const leaveId = Number(req.params.id);
+    const { status } = req.body;
+    const allowed = ["APPROVED", "REJECTED", "CANCELLED", "PENDING"];
+    if (!allowed.includes(String(status || ""))) {
+      return res.status(400).json({ message: "Trạng thái leave request is invalid" });
+    }
+
+    const result = await pool.query(
+      `UPDATE leave_requests
+       SET status = $1,
+           approved_by = $2,
+           approved_at = CASE WHEN $1 IN ('APPROVED', 'REJECTED') THEN NOW() ELSE approved_at END,
+           updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [status, req.user.sub, leaveId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Không tìm thấy leave request" });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update leave request", error: error.message });
+  }
+});
+
+app.get("/users/hr/payroll", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+  try {
+    const month = Number(req.query.month || new Date().getMonth() + 1);
+    const year = Number(req.query.year || new Date().getFullYear());
+    const { rows } = await pool.query(
+      `SELECT s.*, u.employee_code,
+              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name
+       FROM salaries s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.month = $1 AND s.year = $2
+       ORDER BY u.employee_code`,
+      [month, year]
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load bảng lương", error: error.message });
+  }
+});
+
+app.post("/users/hr/payroll/calculate", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const month = Number(req.body.month || new Date().getMonth() + 1);
+    const year = Number(req.body.year || new Date().getFullYear());
+    const expectedWorkDays = Number(req.body.expectedWorkDays || 26);
+
+    const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+    const periodEndDate = new Date(year, month, 0);
+    const periodEnd = `${year}-${String(month).padStart(2, "0")}-${String(periodEndDate.getDate()).padStart(2, "0")}`;
+
+    const contracts = await pool.query(
+      `SELECT DISTINCT ON (c.user_id)
+              c.user_id,
+              c.base_salary,
+              c.overtime_rate,
+              c.status
+       FROM employee_contracts c
+       WHERE c.status = 'ACTIVE'
+         AND c.start_date <= $2
+         AND (c.end_date IS NULL OR c.end_date >= $1)
+       ORDER BY c.user_id, c.start_date DESC`,
+      [periodStart, periodEnd]
+    );
+
+    let processed = 0;
+    for (const contract of contracts.rows) {
+      const attendance = await pool.query(
+        `SELECT COUNT(DISTINCT DATE(check_in_time))::int AS worked_days
+         FROM attendance_logs
+         WHERE user_id = $1
+           AND check_in_time IS NOT NULL
+           AND DATE(check_in_time) BETWEEN $2 AND $3`,
+        [contract.user_id, periodStart, periodEnd]
+      );
+
+      const workedDays = Number(attendance.rows[0]?.worked_days || 0);
+      const baseSalary = Number(contract.base_salary || 0);
+      const dailySalary = expectedWorkDays > 0 ? baseSalary / expectedWorkDays : 0;
+      const deductions = Math.max(0, expectedWorkDays - workedDays) * dailySalary;
+      const totalSalary = Math.max(0, baseSalary - deductions);
+
+      await pool.query(
+        `INSERT INTO salaries
+         (user_id, month, year, base_salary, overtime_hours, overtime_rate, bonus, deductions, total_salary, status, notes, updated_at)
+         VALUES ($1,$2,$3,$4,0,$5,0,$6,$7,'PENDING',$8,NOW())
+         ON CONFLICT (user_id, month, year)
+         DO UPDATE SET
+           base_salary = EXCLUDED.base_salary,
+           overtime_hours = EXCLUDED.overtime_hours,
+           overtime_rate = EXCLUDED.overtime_rate,
+           bonus = EXCLUDED.bonus,
+           deductions = EXCLUDED.deductions,
+           total_salary = EXCLUDED.total_salary,
+           notes = EXCLUDED.notes,
+           updated_at = NOW()`,
+        [
+          contract.user_id,
+          month,
+          year,
+          baseSalary,
+          Number(contract.overtime_rate || 0),
+          deductions,
+          totalSalary,
+          `Tính lương tự động: ${workedDays}/${expectedWorkDays} công`
+        ]
+      );
+      processed += 1;
+    }
+
+    return res.json({
+      message: "Payroll calculation completed",
+      month,
+      year,
+      processed
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to calculate payroll", error: error.message });
+  }
+});
+
+ensureHrTables()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`user-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to initialize HR tables:", error.message);
+    process.exit(1);
+  });
+
+
+

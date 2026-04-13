@@ -80,7 +80,7 @@ function UsersPage({ token }) {
       setUsers(Array.isArray(data) ? data : []);
       setStatus("User list loaded");
     } catch (error) {
-      setStatus(`Failed to load user list: ${error.message}`);
+      setStatus(`Unable to load user list: ${error.message}`);
     }
   }, [token]);
 
@@ -172,11 +172,11 @@ function UsersPage({ token }) {
 
       if (isEditing) {
         await apiRequest(`/users/${modalForm.id}`, token, { method: "PUT", body: payload });
-        setStatus("User updated successfully");
+        setStatus("User updated successful");
       } else {
         const created = await apiRequest("/users", token, { method: "POST", body: payload });
         const defaultPasswordMsg = created?.defaultPassword ? ` (default password: ${created.defaultPassword})` : "";
-        setStatus(`User created successfully${defaultPasswordMsg}`);
+        setStatus(`User created successful${defaultPasswordMsg}`);
       }
 
       setIsModalOpen(false);
@@ -193,7 +193,7 @@ function UsersPage({ token }) {
         return;
       }
       await apiRequest(`/users/${id}`, token, { method: "DELETE" });
-      setStatus("User deleted successfully");
+      setStatus("Deleted user successful");
       await loadUsers();
     } catch (error) {
       setStatus(`User deletion failed: ${error.message}`);
@@ -350,7 +350,7 @@ function AccountsPage({ token }) {
       setAccounts(Array.isArray(data) ? data : []);
       setStatus("Account list loaded");
     } catch (error) {
-      setStatus(`Failed to load accounts: ${error.message}`);
+      setStatus(`Unable to load accounts: ${error.message}`);
     }
   }, [token]);
 
@@ -398,20 +398,20 @@ function AccountsPage({ token }) {
   const updateRole = async (userId, role) => {
     try {
       await apiRequest(`/auth/accounts/${userId}/role`, token, { method: "PUT", body: { role } });
-      setStatus("Role updated successfully");
+      setStatus("Role updated successful");
       await loadAccounts();
     } catch (error) {
-      setStatus(`Role update failed: ${error.message}`);
+      setStatus(`Update roles failed: ${error.message}`);
     }
   };
 
   const updateStatus = async (userId, accountStatus) => {
     try {
       await apiRequest(`/auth/accounts/${userId}/status`, token, { method: "PUT", body: { accountStatus } });
-      setStatus("Account status updated successfully");
+      setStatus("Account status updated successful");
       await loadAccounts();
     } catch (error) {
-      setStatus(`Status update failed: ${error.message}`);
+      setStatus(`Update status failed: ${error.message}`);
     }
   };
 
@@ -428,14 +428,14 @@ function AccountsPage({ token }) {
   const resetPassword = async () => {
     try {
       if (!passwordForm.newPassword || passwordForm.newPassword.length < 6) {
-        setStatus("New password must be at least 6 characters");
+        setStatus("Password must be at least 6 characters");
         return;
       }
       await apiRequest(`/auth/accounts/${passwordForm.userId}/password`, token, {
         method: "PUT",
         body: { newPassword: passwordForm.newPassword, unlockAccount: passwordForm.unlockAccount }
       });
-      setStatus("Password reset successfully");
+      setStatus("Password reset successful");
       setPasswordModalOpen(false);
       await loadAccounts();
     } catch (error) {
@@ -576,6 +576,19 @@ export default function AdminWorkspace({ token, profile }) {
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -1,0 +1,6 @@
+voucherCode,voucherType,category,amount,voucherDate,status,description
+PT-2026-001,INCOME,Tam ung chu dau tu dot 1,450000000,2026-04-01,APPROVED,Nhan tam ung khoi cong du an
+PC-2026-014,EXPENSE,Chi phi ep coc,168000000,2026-04-08,APPROVED,Thanh toan nha thau ep coc
+PC-2026-021,EXPENSE,Mua vat tu be tong,132500000,2026-04-15,APPROVED,Thanh toan vat tu dot 1
+PT-2026-003,INCOME,Thanh toan khoi luong giai doan 1,280000000,2026-05-05,DRAFT,Cho doi soat ho so nghiem thu
+PC-2026-033,EXPENSE,Nhan cong thi cong mong,96500000,2026-05-09,DRAFT,Tam ung nhan cong to mong

@@ -8,7 +8,7 @@ function AttendancePage({ token, profile }) {
   return <AttendancePanel token={token} profile={profile} />;
 }
 
-function MyProjectsPage({ token }) {
+function MyProjectPage({ token }) {
   const [projects, setProjects] = useState([]);
   const [status, setStatus] = useState("Ready");
 
@@ -18,7 +18,7 @@ function MyProjectsPage({ token }) {
       setProjects(Array.isArray(data) ? data : []);
       setStatus("Project list loaded");
     } catch (error) {
-      setStatus(`Failed to load project list: ${error.message}`);
+      setStatus(`Unable to load list project: ${error.message}`);
     }
   }, [token]);
 
@@ -79,7 +79,7 @@ function HistoryPage({ token }) {
       setHistory(Array.isArray(data) ? data : []);
       setStatus("Attendance history loaded");
     } catch (error) {
-      setStatus(`Failed to load attendance history: ${error.message}`);
+      setStatus(`Unable to load history attendance: ${error.message}`);
     }
   }, [token]);
 
@@ -151,7 +151,7 @@ function SchedulePage({ token }) {
       setSchedule(Array.isArray(data) ? data : []);
       setStatus("Work schedule loaded");
     } catch (error) {
-      setStatus(`Failed to load work schedule: ${error.message}`);
+      setStatus(`Unable to load work schedule: ${error.message}`);
     }
   }, [token]);
 
@@ -191,10 +191,10 @@ function SchedulePage({ token }) {
             {item.address && <p className="text-xs text-graphite/60 mt-2">📍 {item.address}</p>}
             <div className="mt-3 space-y-1">
               <p className="text-xs text-graphite/70">
-                <span className="font-semibold">Start:</span> {item.work_start ? new Date(item.work_start).toLocaleString('vi-VN') : 'Not set'}
+                <span className="font-semibold">Start:</span> {item.work_start ? new Date(item.work_start).toLocaleString('en-US') : 'Not set'}
               </p>
               <p className="text-xs text-graphite/70">
-                <span className="font-semibold">End:</span> {item.work_end ? new Date(item.work_end).toLocaleString('vi-VN') : 'Not set'}
+                <span className="font-semibold">End:</span> {item.work_end ? new Date(item.work_end).toLocaleString('en-US') : 'Not set'}
               </p>
             </div>
           </div>
@@ -204,7 +204,7 @@ function SchedulePage({ token }) {
       {schedule.length === 0 && (
         <div className="rounded-2xl border border-dashed border-steel/20 bg-white p-12 text-center">
           <div className="text-4xl mb-3">📅</div>
-          <p className="text-graphite/60">No schedule available</p>
+          <p className="text-graphite/60">No work schedule yet</p>
         </div>
       )}
     </section>
@@ -226,7 +226,7 @@ function SalaryPage({ token }) {
       setSalaryHistory(Array.isArray(historyData) ? historyData : []);
       setStatus("Salary loaded");
     } catch (error) {
-      setStatus(`Failed to load salary: ${error.message}`);
+      setStatus(`Unable to load salary: ${error.message}`);
     }
   }, [token]);
 
@@ -254,25 +254,25 @@ function SalaryPage({ token }) {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-3">
               <div className="flex justify-between">
-                <span className="text-graphite/70">Base salary:</span>
-                <span className="font-semibold">{new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(salary.base_salary)}</span>
+                <span className="text-graphite/70">Salary base:</span>
+                <span className="font-semibold">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salary.base_salary)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-graphite/70">Overtime ({salary.overtime_hours}h):</span>
-                <span className="font-semibold">{new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(salary.overtime_hours * salary.overtime_rate)}</span>
+                <span className="font-semibold">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salary.overtime_hours * salary.overtime_rate)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-graphite/70">Bonus:</span>
-                <span className="font-semibold text-green-700">{new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(salary.bonus)}</span>
+                <span className="font-semibold text-green-700">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salary.bonus)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-graphite/70">Deductions:</span>
-                <span className="font-semibold text-red-700">-{new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(salary.deductions)}</span>
+                <span className="font-semibold text-red-700">-{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salary.deductions)}</span>
               </div>
               <hr className="border-steel/20" />
               <div className="flex justify-between text-lg font-bold">
                 <span>Total salary:</span>
-                <span className="text-green-700">{new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(salary.total_salary)}</span>
+                <span className="text-green-700">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salary.total_salary)}</span>
               </div>
             </div>
             <div className="space-y-3">
@@ -290,8 +290,8 @@ function SalaryPage({ token }) {
               </div>
               {salary.payment_date && (
                 <div className="flex justify-between">
-                  <span className="text-graphite/70">Payment date:</span>
-                  <span className="font-semibold">{new Date(salary.payment_date).toLocaleDateString('vi-VN')}</span>
+                  <span className="text-graphite/70">Date payment:</span>
+                  <span className="font-semibold">{new Date(salary.payment_date).toLocaleDateString('en-US')}</span>
                 </div>
               )}
               {salary.notes && (
@@ -306,7 +306,7 @@ function SalaryPage({ token }) {
       )}
 
       <div className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-        <h3 className="text-lg font-bold text-steel mb-4">Salary History</h3>
+        <h3 className="text-lg font-bold text-steel mb-4">History salary</h3>
         <section className="overflow-x-auto">
           <table className="min-w-full text-left text-sm">
             <thead>
@@ -322,7 +322,7 @@ function SalaryPage({ token }) {
                 <tr key={`${item.month}-${item.year}`} className="border-b border-steel/10 hover:bg-steel/5 transition">
                   <td className="p-3 font-medium text-graphite">{item.month}/{item.year}</td>
                   <td className="p-3 font-semibold text-green-700">
-                    {new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(item.total_salary)}
+                    {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(item.total_salary)}
                   </td>
                   <td className="p-3">
                     <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
@@ -336,7 +336,7 @@ function SalaryPage({ token }) {
                     </span>
                   </td>
                   <td className="p-3 text-graphite text-xs">
-                    {item.payment_date ? new Date(item.payment_date).toLocaleDateString('vi-VN') : '-'}
+                    {item.payment_date ? new Date(item.payment_date).toLocaleDateString('en-US') : '-'}
                   </td>
                 </tr>
               ))}
@@ -377,7 +377,7 @@ export default function EmployeeWorkspace({ token, profile }) {
       />
       <div className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
         {activePage === "attendance" && <AttendancePage token={token} profile={profile} />}
-        {activePage === "projects" && <MyProjectsPage token={token} />}
+        {activePage === "projects" && <MyProjectPage token={token} />}
         {activePage === "schedule" && <SchedulePage token={token} />}
         {activePage === "salary" && <SalaryPage token={token} />}
         {activePage === "history" && <HistoryPage token={token} />}
@@ -385,5 +385,20 @@ export default function EmployeeWorkspace({ token, profile }) {
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

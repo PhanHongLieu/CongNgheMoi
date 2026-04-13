@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -59,7 +59,7 @@ app.post("/notifications", authenticate, async (req, res) => {
     const targetUserId = userId || req.user.sub;
 
     if (!title || !message) {
-      return res.status(400).json({ message: "title and message are required" });
+      return res.status(400).json({ message: "title và message is required" });
     }
 
     if (req.user.role === "EMPLOYEE" && targetUserId !== req.user.sub) {
@@ -81,7 +81,7 @@ app.post("/notifications", authenticate, async (req, res) => {
 
     return res.status(201).json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to create notification", error: error.message });
+    return res.status(500).json({ message: "Failed to create thông báo", error: error.message });
   }
 });
 
@@ -103,7 +103,7 @@ app.get("/notifications", authenticate, async (req, res) => {
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch notifications", error: error.message });
+    return res.status(500).json({ message: "Failed to load thông báo", error: error.message });
   }
 });
 
@@ -119,7 +119,7 @@ app.put("/notifications/:id/read", authenticate, async (req, res) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Notification not found" });
+      return res.status(404).json({ message: "Không tìm thấy thông báo" });
     }
 
     await writeDataLog({
@@ -132,10 +132,13 @@ app.put("/notifications/:id/read", authenticate, async (req, res) => {
 
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to update notification", error: error.message });
+    return res.status(500).json({ message: "Failed to update thông báo", error: error.message });
   }
 });
 
 app.listen(port, () => {
   console.log(`notification-service listening on ${port}`);
 });
+
+
+

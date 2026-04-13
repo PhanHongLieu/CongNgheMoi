@@ -18,7 +18,7 @@ export default function AdminDashboard({ token, profile }) {
   const [users, setUsers] = useState([]);
   const [projects, setProjects] = useState([]);
   const [hrSummary, setHrSummary] = useState([]);
-  const [status, setStatus] = useState("Loading admin dashboard...");
+  const [status, setStatus] = useState("Loading dashboard admin...");
 
   const loadData = useCallback(async () => {
     try {
@@ -33,7 +33,7 @@ export default function AdminDashboard({ token, profile }) {
       setHrSummary(Array.isArray(hrData) ? hrData : []);
       setStatus("Ready");
     } catch (error) {
-      setStatus(`Unable to load admin dashboard: ${error.message}`);
+      setStatus(`Unable to load dashboard admin: ${error.message}`);
     }
   }, [token]);
 
@@ -44,37 +44,37 @@ export default function AdminDashboard({ token, profile }) {
   const moduleCards = [
     {
       title: "Drill Data Management",
-      detail: "Track equipment loads, roles and usage status",
-      metric: `${users.length} load records`
+      detail: "Track equipment, roles, and usage status",
+      metric: `${users.length} records`
     },
     {
-      title: "Employee Management",
+      title: "Manager staff",
       detail: "CRUD employees, update information and face model",
       metric: `${users.filter((u) => u.role === "EMPLOYEE").length} employees`
     },
     {
       title: "Project Management",
-      detail: "Monitor projects list and deployment status",
+      detail: "Track project list and deployment status",
       metric: `${projects.length} projects`
     },
     {
-      title: "Reporting Summary",
-      detail: "Stats for attendance, workforce and progress",
-      metric: `${hrSummary.length} report entries`
+      title: "Reporting Overview",
+      detail: "Attendance, workforce, and progress statistics",
+      metric: `${hrSummary.length} report items`
     },
     {
-      title: "Permissions Management",
+      title: "Manager permissions",
       detail: "Adjust roles: ADMIN / MANAGER / EMPLOYEE",
-      metric: `${users.filter((u) => u.role === "MANAGER").length} managers`
+      metric: `${users.filter((u) => u.role === "MANAGER").length} manager`
     }
   ];
 
   return (
     <section className="space-y-4 rounded-3xl bg-white/80 p-6 shadow-soft backdrop-blur">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-2xl font-bold text-steel">Admin Dashboard</h2>
+        <h2 className="text-2xl font-bold text-steel">Dashboard admin</h2>
         <span className="rounded-full bg-sand px-3 py-1 text-xs font-semibold text-graphite">
-          Welcome, {profile?.fullName}
+          Hello, {profile?.fullName}
         </span>
       </div>
 
@@ -94,20 +94,20 @@ export default function AdminDashboard({ token, profile }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-2xl border border-steel/15 bg-white p-4">
-          <h3 className="mb-2 text-lg font-semibold text-steel">Recent Employees</h3>
+          <h3 className="mb-2 text-lg font-semibold text-steel">Recent Staff</h3>
           <div className="space-y-2 text-sm text-graphite">
             {users.slice(0, 5).map((user) => (
               <p key={user.id}>
                 {user.employee_code} - {user.full_name} ({user.role})
               </p>
             ))}
-            {users.length === 0 && <p>No employee data available.</p>}
+            {users.length === 0 && <p>No staff data.</p>}
           </div>
         </section>
 
         <section className="rounded-2xl border border-steel/15 bg-white p-4">
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-steel">Projects</h3>
+            <h3 className="text-lg font-semibold text-steel">Project</h3>
             <button
               type="button"
               onClick={loadData}
@@ -122,11 +122,25 @@ export default function AdminDashboard({ token, profile }) {
                 {project.project_code} - {project.name} ({project.status})
               </p>
             ))}
-            {projects.length === 0 && <p>No project data available.</p>}
+            {projects.length === 0 && <p>No project data.</p>}
           </div>
         </section>
       </div>
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

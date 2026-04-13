@@ -32,7 +32,7 @@ export default function AttendancePanel({ token, profile }) {
           setSelectedProject(String(data[0].id));
         }
       } catch (error) {
-        setStatus(`Failed loading project list: ${error.message}`, "error");
+        setStatus(`Failed to load project list: ${error.message}`, "error");
       }
     };
     fetchProjects();
@@ -45,9 +45,9 @@ export default function AttendancePanel({ token, profile }) {
         videoRef.current.srcObject = stream;
         setStreaming(true);
       }
-      setStatus("Camera ready — align your face in the frame", "idle");
+      setStatus("Camera  ready - please align your face in the frame", "idle");
     } catch (error) {
-      setStatus(`Unable to access camera: ${error.message}`, "error");
+      setStatus(`Unable to access cameout: ${error.message}`, "error");
     }
   };
 
@@ -64,7 +64,7 @@ export default function AttendancePanel({ token, profile }) {
     const width = videoRef.current.videoWidth;
     const height = videoRef.current.videoHeight;
     if (!width || !height) {
-      setStatus("Camera frame not ready — please wait briefly", "error");
+      setStatus("Camera frame not ready. Please wait a moment", "error");
       return;
     }
     const ctx = canvasRef.current.getContext("2d");
@@ -74,7 +74,7 @@ export default function AttendancePanel({ token, profile }) {
     const imageData = canvasRef.current.toDataURL("image/jpeg", 0.9);
     setFaceTemplate(imageData);
     setFacePreview(imageData);
-    setStatus("Face template captured successfully", "success");
+    setStatus("Face sample captured successfully", "success");
   };
 
   const fetchGPS = () =>
@@ -98,9 +98,9 @@ export default function AttendancePanel({ token, profile }) {
   const refreshGPS = async () => {
     try {
       await fetchGPS();
-      setStatus("GPS position updated", "success");
+      setStatus("Updated location GPS", "success");
     } catch (error) {
-      setStatus(`Unable to get GPS position: ${error.message}`, "error");
+      setStatus(`Unable to get location GPS: ${error.message}`, "error");
     }
   };
 
@@ -109,14 +109,14 @@ export default function AttendancePanel({ token, profile }) {
   const submitAttendance = async (type) => {
     try {
       if (!selectedProject) {
-        setStatus("Please select a project before checking attendance", "error");
+        setStatus("Please select project before attendance", "error");
         return;
       }
       if (type === "in" && !faceTemplate) {
-        setStatus("Please capture face template before check-in", "error");
+        setStatus("Please capture sample face before check in", "error");
         return;
       }
-      setStatus("Acquiring GPS coordinates...", "loading");
+      setStatus("In  get coordinates GPS...", "loading");
       const coords = await getCurrentPosition();
       setStatus("Submitting attendance data...", "loading");
 
@@ -172,7 +172,7 @@ export default function AttendancePanel({ token, profile }) {
         <div className="flex items-center gap-2">
           <div className="rounded-lg bg-indigo-100 p-2"><span className="text-xl">📷</span></div>
           <div>
-            <h2 className="text-xl font-bold text-steel">Face + GPS Attendance</h2>
+            <h2 className="text-xl font-bold text-steel">Attendance face + GPS</h2>
             <p className="text-xs text-graphite/60">Hello, {profile?.fullName || "Employee"}</p>
           </div>
         </div>
@@ -187,7 +187,7 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-blue-100 p-1.5"><span>🏗️</span></div>
-              <h3 className="font-semibold text-steel">Step 1 — Select Project</h3>
+              <h3 className="font-semibold text-steel">Step 1 - Select project</h3>
             </div>
             <select
               className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm text-graphite focus:outline-none focus:ring-2 focus:ring-steel/30"
@@ -205,7 +205,7 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-orange-100 p-1.5"><span>📸</span></div>
-              <h3 className="font-semibold text-steel">Step 2 — Capture Face</h3>
+              <h3 className="font-semibold text-steel">Step 2 - Capture Face</h3>
             </div>
             <div className="flex flex-wrap gap-2">
               {!streaming ? (
@@ -227,7 +227,7 @@ export default function AttendancePanel({ token, profile }) {
             {facePreview && (
               <div className="mt-3">
                 <p className="mb-1 text-xs font-medium text-graphite/60">Captured image:</p>
-                <img src={facePreview} alt="Face template" className="h-20 w-28 rounded-xl object-cover border border-steel/15 shadow-sm" />
+                <img src={facePreview} alt="Face sample" className="h-20 w-28 rounded-xl object-cover border border-steel/15 shadow-sm" />
               </div>
             )}
           </div>
@@ -237,11 +237,11 @@ export default function AttendancePanel({ token, profile }) {
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="rounded-lg bg-green-100 p-1.5"><span>📍</span></div>
-              <h3 className="font-semibold text-steel">Step 3 — GPS Location</h3>
+              <h3 className="font-semibold text-steel">Step 3 - Location GPS</h3>
             </div>
             <button type="button" onClick={refreshGPS} disabled={gpsLoading}
                 className="rounded-lg bg-green-100 hover:bg-green-200 px-3 py-1.5 text-xs font-semibold text-green-700 transition disabled:opacity-50">
-                {gpsLoading ? "⏳ Getting location..." : "🔄 Refresh GPS"}
+                {gpsLoading ? "⏳ In  get location..." : "🔄 Refresh GPS"}
               </button>
             </div>
             {gpsCoords ? (
@@ -250,7 +250,7 @@ export default function AttendancePanel({ token, profile }) {
                 <p>📍 Lng: <strong>{gpsCoords.lng.toFixed(6)}</strong></p>
               </div>
             ) : (
-              <p className="text-sm text-graphite/50 italic">GPS is automatically captured during attendance</p>
+              <p className="text-sm text-graphite/50 italic">GPS  is captured automatically during attendance</p>
             )}
           </div>
 
@@ -258,7 +258,7 @@ export default function AttendancePanel({ token, profile }) {
           <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-lg bg-emerald-100 p-1.5"><span>✅</span></div>
-              <h3 className="font-semibold text-steel">Step 4 — Confirm Attendance</h3>
+              <h3 className="font-semibold text-steel">Step 4 - Confirm attendance</h3>
             </div>
             <div className="flex gap-3">
               <button type="button" onClick={() => submitAttendance("in")}
@@ -290,18 +290,32 @@ export default function AttendancePanel({ token, profile }) {
           </div>
 
           <div className="rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 p-5 text-white shadow-lg">
-            <h3 className="font-bold text-lg mb-3">📋 Attendance Guide</h3>
+            <h3 className="font-bold text-lg mb-3">📋 Instructions attendance</h3>
             <ol className="space-y-2 text-sm text-indigo-100 list-decimal list-inside">
               <li>Select your assigned project</li>
               <li>Enable camera and capture face template</li>
               <li>Check or update GPS coordinates (optional)</li>
-              <li>Press <strong className="text-white">▶ Check-in</strong> or <strong className="text-white">■ Check-out</strong></li>
+              <li>Click <strong className="text-white">▶ Check-in</strong> or <strong className="text-white">■ Check-out</strong></li>
             </ol>
-            <p className="mt-3 text-xs text-indigo-200">* GPS will be recorded automatically when attendance is confirmed</p>
+            <p className="mt-3 text-xs text-indigo-200">* GPS is recorded automatically when attendance is confirmed</p>
           </div>
         </div>
       </div>
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

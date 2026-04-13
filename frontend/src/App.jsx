@@ -6,6 +6,28 @@ import { getTranslation } from "./i18n";
 
 const API_BASE = "http://localhost:8080/api";
 
+function parseJwtPayload(token) {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) {
+      return null;
+    }
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const decoded = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
+
+function isTokenExpired(token) {
+  const payload = parseJwtPayload(token);
+  if (!payload || !payload.exp) {
+    return true;
+  }
+  return Number(payload.exp) * 1000 <= Date.now();
+}
+
 export default function App() {
   const [email, setEmail] = useState("admin@mdp.local");
   const [password, setPassword] = useState("admin123");
@@ -39,10 +61,14 @@ export default function App() {
     try {
       const savedToken = localStorage.getItem("mdp_access_token");
       const savedProfile = localStorage.getItem("mdp_profile");
-      if (savedToken && savedProfile) {
+      if (savedToken && savedProfile && !isTokenExpired(savedToken)) {
         setToken(savedToken);
         setProfile(JSON.parse(savedProfile));
         setMessage("Session restored successfully");
+      } else if (savedToken || savedProfile) {
+        localStorage.removeItem("mdp_access_token");
+        localStorage.removeItem("mdp_profile");
+        setMessage("Session expired. Please sign in again.");
       }
     } catch {
       localStorage.removeItem("mdp_access_token");
@@ -56,8 +82,21 @@ export default function App() {
       pushToast(payload.type, payload.message);
     };
 
+    const authInvalidHandler = () => {
+      setToken("");
+      setProfile(null);
+      setAccountModalOpen(false);
+      localStorage.removeItem("mdp_access_token");
+      localStorage.removeItem("mdp_profile");
+      setMessage("Session expired. Please sign in again.");
+    };
+
     window.addEventListener("app:toast", handler);
-    return () => window.removeEventListener("app:toast", handler);
+    window.addEventListener("app:auth-invalid", authInvalidHandler);
+    return () => {
+      window.removeEventListener("app:toast", handler);
+      window.removeEventListener("app:auth-invalid", authInvalidHandler);
+    };
   }, []);
 
   const cardClass = useMemo(

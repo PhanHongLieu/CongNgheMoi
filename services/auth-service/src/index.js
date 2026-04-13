@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -128,7 +128,7 @@ app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ message: "Email và mật khẩu is required" });
     }
 
     const user = await getAccountByEmail(email);
@@ -205,7 +205,7 @@ app.post("/auth/login", async (req, res) => {
       }
     });
   } catch (error) {
-    return res.status(500).json({ message: "Login failed", error: error.message });
+    return res.status(500).json({ message: "Đăng nhập failed", error: error.message });
   }
 });
 
@@ -213,13 +213,13 @@ app.post("/auth/refresh", async (req, res) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
-      return res.status(400).json({ message: "Refresh token is required" });
+      return res.status(400).json({ message: "Refresh token là trường bắt buộc" });
     }
 
     const payload = jwt.verify(refreshToken, REFRESH_SECRET, { issuer: TOKEN_ISSUER });
     const tokenCheck = await pool.query("SELECT * FROM refresh_tokens WHERE token = $1", [refreshToken]);
     if (tokenCheck.rowCount === 0) {
-      return res.status(401).json({ message: "Refresh token revoked" });
+      return res.status(401).json({ message: "Refresh token đã bị thu hồi" });
     }
 
     const user = await getAccountByUserId(payload.sub);
@@ -227,7 +227,7 @@ app.post("/auth/refresh", async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
     if (user.account_status !== "ACTIVE") {
-      return res.status(403).json({ message: "Account is not active" });
+      return res.status(403).json({ message: "Tài khoản chưa được kích hoạt" });
     }
 
     const accessToken = signAccessToken(user);
@@ -241,7 +241,7 @@ app.post("/auth/refresh", async (req, res) => {
 
     return res.json({ accessToken });
   } catch (error) {
-    return res.status(401).json({ message: "Invalid refresh token" });
+    return res.status(401).json({ message: "Refresh token is invalid" });
   }
 });
 
@@ -249,7 +249,7 @@ app.post("/auth/logout", async (req, res) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
-      return res.status(400).json({ message: "Refresh token is required" });
+      return res.status(400).json({ message: "Refresh token là trường bắt buộc" });
     }
 
     const existing = await pool.query("SELECT user_id FROM refresh_tokens WHERE token = $1", [refreshToken]);
@@ -267,7 +267,7 @@ app.post("/auth/logout", async (req, res) => {
 
     return res.json({ message: "Logged out" });
   } catch (error) {
-    return res.status(500).json({ message: "Logout failed", error: error.message });
+    return res.status(500).json({ message: "Đăng xuất failed", error: error.message });
   }
 });
 
@@ -277,10 +277,10 @@ app.put("/auth/me/password", authenticate, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
 
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: "currentPassword and newPassword are required" });
+      return res.status(400).json({ message: "currentPassword và newPassword is required" });
     }
     if (String(newPassword).length < 6) {
-      return res.status(400).json({ message: "newPassword must be at least 6 characters" });
+      return res.status(400).json({ message: "newPassword phải có ít nhất 6 ký tự" });
     }
 
     const account = await getAccountByUserId(userId);
@@ -315,7 +315,7 @@ app.put("/auth/me/password", authenticate, async (req, res) => {
 
     return res.json({ message: "Password changed successfully" });
   } catch (error) {
-    return res.status(500).json({ message: "Password update failed", error: error.message });
+    return res.status(500).json({ message: "Cập nhật mật khẩu failed", error: error.message });
   }
 });
 
@@ -342,7 +342,7 @@ app.get("/auth/accounts", authenticate, authorize("ADMIN"), async (req, res) => 
     );
     return res.json(rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch accounts", error: error.message });
+    return res.status(500).json({ message: "Failed to load tài khoản", error: error.message });
   }
 });
 
@@ -373,7 +373,7 @@ app.put("/auth/accounts/:id/role", authenticate, authorize("ADMIN"), async (req,
 
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Role update failed", error: error.message });
+    return res.status(500).json({ message: "Cập nhật vai trò failed", error: error.message });
   }
 });
 
@@ -390,7 +390,7 @@ app.put("/auth/accounts/:id/status", authenticate, authorize("ADMIN"), async (re
     if (accountStatus === "LOCKED") {
       const minutes = Number(lockMinutes || LOCK_MINUTES);
       if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10080) {
-        return res.status(400).json({ message: "lockMinutes must be between 1 and 10080" });
+        return res.status(400).json({ message: "lockMinutes phải nằm trong khoảng từ 1 đến 10080" });
       }
       lockUntil = new Date(Date.now() + minutes * 60 * 1000);
     }
@@ -423,7 +423,7 @@ app.put("/auth/accounts/:id/status", authenticate, authorize("ADMIN"), async (re
 
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Status update failed", error: error.message });
+    return res.status(500).json({ message: "Cập nhật trạng thái failed", error: error.message });
   }
 });
 
@@ -432,7 +432,7 @@ app.put("/auth/accounts/:id/password", authenticate, authorize("ADMIN"), async (
     const userId = Number(req.params.id);
     const { newPassword, unlockAccount } = req.body;
     if (!newPassword || String(newPassword).length < 6) {
-      return res.status(400).json({ message: "newPassword is required and must be at least 6 characters" });
+      return res.status(400).json({ message: "newPassword là trường bắt buộc và phải có ít nhất 6 ký tự" });
     }
 
     const passwordHash = await bcrypt.hash(String(newPassword), 10);
@@ -463,7 +463,7 @@ app.put("/auth/accounts/:id/password", authenticate, authorize("ADMIN"), async (
 
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Password update failed", error: error.message });
+    return res.status(500).json({ message: "Cập nhật mật khẩu failed", error: error.message });
   }
 });
 
@@ -485,10 +485,14 @@ app.put("/auth/users/:id/role", authenticate, authorize("ADMIN"), async (req, re
     }
     return res.json(result.rows[0]);
   } catch (error) {
-    return res.status(500).json({ message: "Role update failed", error: error.message });
+    return res.status(500).json({ message: "Cập nhật vai trò failed", error: error.message });
   }
 });
 
 app.listen(port, () => {
   console.log(`auth-service listening on ${port}`);
 });
+
+
+
+

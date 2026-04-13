@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -100,7 +100,7 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
     const { projectId, latitude, longitude, faceTemplate } = req.body;
 
     if (!projectId || latitude == null || longitude == null || !faceTemplate) {
-      return res.status(400).json({ message: "projectId, latitude, longitude, faceTemplate are required" });
+      return res.status(400).json({ message: "projectId, latitude, longitude, faceTemplate is required" });
     }
 
     const assignment = await pool.query(
@@ -134,7 +134,7 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
 
     const score = faceMatchScore(userResult.rows[0].face_template, faceTemplate);
     if (score < 0.75) {
-      return res.status(401).json({ message: "Face verification failed", score: Number(score.toFixed(4)) });
+      return res.status(401).json({ message: "Xác thực khuôn mặt failed", score: Number(score.toFixed(4)) });
     }
 
     const existing = await pool.query(
@@ -171,7 +171,7 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
       data: result.rows[0]
     });
   } catch (error) {
-    return res.status(500).json({ message: "Check-in failed", error: error.message });
+    return res.status(500).json({ message: "Vào ca failed", error: error.message });
   }
 });
 
@@ -181,7 +181,7 @@ app.post("/attendance/check-out", authenticate, async (req, res) => {
     const { projectId, latitude, longitude } = req.body;
 
     if (!projectId || latitude == null || longitude == null) {
-      return res.status(400).json({ message: "projectId, latitude, longitude are required" });
+      return res.status(400).json({ message: "projectId, latitude, longitude is required" });
     }
 
     const result = await pool.query(
@@ -208,7 +208,7 @@ app.post("/attendance/check-out", authenticate, async (req, res) => {
 
     return res.json({ message: "Check-out successful", data: result.rows[0] });
   } catch (error) {
-    return res.status(500).json({ message: "Check-out failed", error: error.message });
+    return res.status(500).json({ message: "Ra ca failed", error: error.message });
   }
 });
 
@@ -267,7 +267,7 @@ app.get("/attendance/history", authenticate, async (req, res) => {
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch attendance history", error: error.message });
+    return res.status(500).json({ message: "Failed to load lịch sử chấm công", error: error.message });
   }
 });
 
@@ -276,7 +276,7 @@ app.post("/attendance/location", authenticate, authorize("EMPLOYEE", "MANAGER", 
     const { projectId, latitude, longitude, source } = req.body;
 
     if (latitude == null || longitude == null) {
-      return res.status(400).json({ message: "latitude and longitude are required" });
+      return res.status(400).json({ message: "latitude và longitude is required" });
     }
 
     const resolvedProjectId = projectId || null;
@@ -356,7 +356,7 @@ app.get("/attendance/location/latest", authenticate, authorize("ADMIN", "MANAGER
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch latest locations", error: error.message });
+    return res.status(500).json({ message: "Failed to load vị trí mới nhất", error: error.message });
   }
 });
 
@@ -402,7 +402,7 @@ app.get("/attendance/reports/attendance-summary", authenticate, authorize("ADMIN
 
     return res.json(result.rows);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to build attendance report", error: error.message });
+    return res.status(500).json({ message: "Failed to build báo cáo chấm công", error: error.message });
   }
 });
 
@@ -441,10 +441,13 @@ app.get("/attendance/reports/hr-summary", authenticate, authorize("ADMIN"), asyn
       attendance: attendanceSummary.rows[0]
     });
   } catch (error) {
-    return res.status(500).json({ message: "Failed to build HR report", error: error.message });
+    return res.status(500).json({ message: "Failed to build báo cáo nhân sự", error: error.message });
   }
 });
 
 app.listen(port, () => {
   console.log(`attendance-service listening on ${port}`);
 });
+
+
+

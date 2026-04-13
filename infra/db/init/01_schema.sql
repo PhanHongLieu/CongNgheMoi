@@ -249,6 +249,121 @@ CREATE TABLE IF NOT EXISTS project_progress_updates (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS project_plan_boq_items (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  item_type VARCHAR(20) NOT NULL DEFAULT 'PLAN' CHECK (item_type IN ('PLAN', 'BOQ')),
+  item_name VARCHAR(255) NOT NULL,
+  description TEXT,
+  unit VARCHAR(40),
+  quantity NUMERIC(14,2) NOT NULL DEFAULT 0,
+  unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+  status VARCHAR(30) NOT NULL DEFAULT 'PLANNED',
+  planned_date DATE,
+  actual_date DATE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_material_logs (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  material_name VARCHAR(255) NOT NULL,
+  unit VARCHAR(40),
+  planned_qty NUMERIC(14,2) NOT NULL DEFAULT 0,
+  received_qty NUMERIC(14,2) NOT NULL DEFAULT 0,
+  used_qty NUMERIC(14,2) NOT NULL DEFAULT 0,
+  unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+  supplier VARCHAR(255),
+  status VARCHAR(30) NOT NULL DEFAULT 'PLANNED',
+  note TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_resource_allocations (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  resource_type VARCHAR(20) NOT NULL CHECK (resource_type IN ('LABOR', 'EQUIPMENT')),
+  resource_name VARCHAR(255) NOT NULL,
+  quantity NUMERIC(14,2) NOT NULL DEFAULT 0,
+  unit VARCHAR(40),
+  hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 0,
+  working_hours NUMERIC(14,2) NOT NULL DEFAULT 0,
+  status VARCHAR(30) NOT NULL DEFAULT 'PLANNED',
+  note TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_cost_entries (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category VARCHAR(120) NOT NULL,
+  description TEXT,
+  amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  incurred_on DATE,
+  status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_acceptance_records (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title VARCHAR(255) NOT NULL,
+  phase VARCHAR(120),
+  accepted_by VARCHAR(255),
+  accepted_on DATE,
+  status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+  note TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_stage_templates (
+  id SERIAL PRIMARY KEY,
+  stage_name VARCHAR(255) NOT NULL,
+  default_order INTEGER NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS project_stages (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  stage_name VARCHAR(255) NOT NULL,
+  stage_order INTEGER NOT NULL,
+  created_from_template_id INTEGER REFERENCES project_stage_templates(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_stages_project_order
+ON project_stages(project_id, stage_order);
+
+INSERT INTO project_stage_templates (stage_name, default_order)
+SELECT seed.stage_name, seed.default_order
+FROM (
+  VALUES
+    ('Preparation', 1),
+    ('Foundation Construction', 2),
+    ('Structure Construction', 3),
+    ('Finishing', 4),
+    ('Acceptance', 5)
+) AS seed(stage_name, default_order)
+WHERE NOT EXISTS (SELECT 1 FROM project_stage_templates);
+
 CREATE TABLE IF NOT EXISTS employee_locations (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -410,3 +525,4 @@ SELECT
 FROM users worker
 WHERE worker.email = 'worker@mdp.local'
 ON CONFLICT (user_id, month, year) DO NOTHING;
+
