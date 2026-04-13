@@ -30,6 +30,37 @@ const EMPLOYEE_CODE_REGEX = /^[0-9]{8}$/;
 const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "HR_MANAGER", "PROJECT_MANAGER", "EMPLOYEE"];
 const ACCOUNT_STATUSES = ["ACTIVE", "INACTIVE", "LOCKED"];
 
+function normalizeRole(role) {
+  const value = String(role || "").trim().toUpperCase();
+  if (value === "MANAGER") {
+    return "PROJECT_MANAGER";
+  }
+  if (value === "SYSADMIN") {
+    return "SUPER_ADMIN";
+  }
+  return value;
+}
+
+async function ensureAuthSchema() {
+  await pool.query("ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_role_check");
+
+  await pool.query(
+    `UPDATE accounts
+     SET role = CASE
+       WHEN role = 'MANAGER' THEN 'PROJECT_MANAGER'
+       WHEN role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+       ELSE role
+     END
+     WHERE role IN ('MANAGER', 'SYSADMIN')`
+  );
+
+  await pool.query(
+    `ALTER TABLE accounts
+     ADD CONSTRAINT accounts_role_check
+     CHECK (role IN ('SUPER_ADMIN', 'ADMIN', 'HR_MANAGER', 'PROJECT_MANAGER', 'EMPLOYEE'))`
+  );
+}
+
 async function writeDataLog({ action, collection, recordId, username, metadata }) {
   try {
     await pool.query(
@@ -89,7 +120,11 @@ async function getAccountByEmployeeCode(employeeCode) {
             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
             u.email,
             u.profile_image_url,
-            a.role,
+            CASE
+              WHEN a.role = 'MANAGER' THEN 'PROJECT_MANAGER'
+              WHEN a.role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+              ELSE a.role
+            END AS role,
             a.password_hash,
             a.account_status,
             a.failed_login_attempts,
@@ -112,7 +147,11 @@ async function getAccountByUserId(userId) {
             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
             u.email,
             u.profile_image_url,
-            a.role,
+            CASE
+              WHEN a.role = 'MANAGER' THEN 'PROJECT_MANAGER'
+              WHEN a.role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+              ELSE a.role
+            END AS role,
             a.password_hash,
             a.account_status,
             a.failed_login_attempts,
@@ -130,7 +169,7 @@ async function getAccountRoleByUserId(userId) {
   if (result.rowCount === 0) {
     return null;
   }
-  return result.rows[0].role;
+  return normalizeRole(result.rows[0].role);
 }
 
 async function hasAnotherSuperAdmin(excludedUserId) {
@@ -355,7 +394,11 @@ app.get("/auth/accounts", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async
               u.last_name,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
               u.email,
-              a.role,
+              CASE
+                WHEN a.role = 'MANAGER' THEN 'PROJECT_MANAGER'
+                WHEN a.role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+                ELSE a.role
+              END AS role,
               a.account_status,
               a.failed_login_attempts,
               a.locked_until,
@@ -379,9 +422,9 @@ app.get("/auth/accounts", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async
 app.put("/auth/accounts/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
-    const { role } = req.body;
+    const normalizedRole = normalizeRole(req.body?.role);
 
-    if (!USER_ROLES.includes(role)) {
+    if (!USER_ROLES.includes(normalizedRole)) {
       return res.status(400).json({ message: "Invalid role" });
     }
     const targetRole = await getAccountRoleByUserId(userId);
@@ -394,22 +437,22 @@ app.put("/auth/accounts/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN
     if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
       return res.status(403).json({ message: "Admin cannot modify another admin account" });
     }
-    if (req.user.role === "ADMIN" && role === "SUPER_ADMIN") {
+    if (req.user.role === "ADMIN" && normalizedRole === "SUPER_ADMIN") {
       return res.status(403).json({ message: "Only super admin can assign SUPER_ADMIN role" });
     }
-    if (req.user.role === "ADMIN" && role === "ADMIN" && targetRole !== "ADMIN") {
+    if (req.user.role === "ADMIN" && normalizedRole === "ADMIN" && targetRole !== "ADMIN") {
       return res.status(403).json({ message: "Admin cannot grant ADMIN role" });
     }
-    if (Number(req.user.sub) === userId && role !== targetRole) {
+    if (Number(req.user.sub) === userId && normalizedRole !== targetRole) {
       return res.status(403).json({ message: "You cannot change your own role" });
     }
-    if (role === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
+    if (normalizedRole === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
       return res.status(409).json({ message: "Only one SUPER_ADMIN account is allowed" });
     }
 
     const result = await pool.query(
       "UPDATE accounts SET role = $1, updated_at = NOW() WHERE user_id = $2 RETURNING user_id AS id, role",
-      [role, userId]
+      [normalizedRole, userId]
     );
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Account not found" });
@@ -420,7 +463,7 @@ app.put("/auth/accounts/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN
       collection: "account-role",
       recordId: String(userId),
       username: req.user.email,
-      metadata: { role }
+      metadata: { role: normalizedRole }
     });
 
     return res.json(result.rows[0]);
@@ -545,9 +588,9 @@ app.put("/auth/accounts/:id/password", authenticate, authorize("SUPER_ADMIN", "A
 app.put("/auth/users/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
-    const { role } = req.body;
+    const normalizedRole = normalizeRole(req.body?.role);
 
-    if (!USER_ROLES.includes(role)) {
+    if (!USER_ROLES.includes(normalizedRole)) {
       return res.status(400).json({ message: "Invalid role" });
     }
 
@@ -561,22 +604,22 @@ app.put("/auth/users/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"),
     if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
       return res.status(403).json({ message: "Admin cannot modify another admin account" });
     }
-    if (req.user.role === "ADMIN" && role === "SUPER_ADMIN") {
+    if (req.user.role === "ADMIN" && normalizedRole === "SUPER_ADMIN") {
       return res.status(403).json({ message: "Only super admin can assign SUPER_ADMIN role" });
     }
-    if (req.user.role === "ADMIN" && role === "ADMIN" && targetRole !== "ADMIN") {
+    if (req.user.role === "ADMIN" && normalizedRole === "ADMIN" && targetRole !== "ADMIN") {
       return res.status(403).json({ message: "Admin cannot grant ADMIN role" });
     }
-    if (Number(req.user.sub) === userId && role !== targetRole) {
+    if (Number(req.user.sub) === userId && normalizedRole !== targetRole) {
       return res.status(403).json({ message: "You cannot change your own role" });
     }
-    if (role === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
+    if (normalizedRole === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
       return res.status(409).json({ message: "Only one SUPER_ADMIN account is allowed" });
     }
 
     const result = await pool.query(
       "UPDATE accounts SET role = $1, updated_at = NOW() WHERE user_id = $2 RETURNING user_id AS id, role",
-      [role, userId]
+      [normalizedRole, userId]
     );
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Account not found" });
@@ -587,9 +630,16 @@ app.put("/auth/users/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"),
   }
 });
 
-app.listen(port, () => {
-  console.log(`auth-service listening on ${port}`);
-});
+ensureAuthSchema()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`auth-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to initialize auth service:", error.message);
+    process.exit(1);
+  });
 
 
 
