@@ -69,78 +69,6 @@ function MyProjectPage({ token }) {
   );
 }
 
-function HistoryPage({ token }) {
-  const [history, setHistory] = useState([]);
-  const [status, setStatus] = useState("Ready");
-
-  const load = useCallback(async () => {
-    try {
-      const data = await apiRequest("/attendance/history", token);
-      setHistory(Array.isArray(data) ? data : []);
-      setStatus("Attendance history loaded");
-    } catch (error) {
-      setStatus(`Unable to load history attendance: ${error.message}`);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  return (
-    <section className="space-y-4">
-      <div className="flex items-center justify-between rounded-2xl bg-white/50 p-4 backdrop-blur">
-        <div className="flex items-center gap-2">
-          <div className="rounded-lg bg-green-100 p-2"><span className="text-xl">📋</span></div>
-          <h2 className="text-xl font-bold text-steel">Attendance History</h2>
-        </div>
-        <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Reload</button>
-      </div>
-
-      {status && status !== "Attendance history loaded" && status !== "Ready" && (
-        <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
-          <span className="text-lg">⚠️</span><span>{status}</span>
-        </div>
-      )}
-
-      <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-        <table className="min-w-full text-left text-sm">
-          <thead>
-            <tr className="border-b-2 border-steel/20 bg-steel/5">
-              <th className="p-3 font-semibold text-steel">Project</th>
-              <th className="p-3 font-semibold text-steel">Check-in</th>
-              <th className="p-3 font-semibold text-steel">Check-out</th>
-              <th className="p-3 font-semibold text-steel">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.map((item) => (
-              <tr key={item.id} className="border-b border-steel/10 hover:bg-steel/5 transition">
-                <td className="p-3 font-medium text-graphite">{item.project_name || "-"}</td>
-                <td className="p-3 text-graphite text-xs">{item.check_in_time || "-"}</td>
-                <td className="p-3 text-xs">
-                  <span className={item.check_out_time ? "text-green-700 font-semibold" : "text-amber-700 font-semibold"}>{item.check_out_time || "Working"}</span>
-                </td>
-                <td className="p-3">
-                  <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${item.check_out_time ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                    {item.check_out_time ? 'Completed' : 'Working'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {history.length === 0 && (
-          <div className="text-center py-10">
-            <div className="text-4xl mb-3">📋</div>
-            <p className="text-graphite/60">No attendance history yet</p>
-          </div>
-        )}
-      </section>
-    </section>
-  );
-}
-
 function SchedulePage({ token }) {
   const [schedule, setSchedule] = useState([]);
   const [status, setStatus] = useState("Ready");
@@ -360,8 +288,7 @@ export default function EmployeeWorkspace({ token, profile }) {
       { key: "attendance", label: getTranslation("en", "faceAttendanceGPS") },
       { key: "projects", label: getTranslation("en", "myProjects") },
       { key: "schedule", label: getTranslation("en", "workSchedule") },
-      { key: "salary", label: getTranslation("en", "salary") },
-      { key: "history", label: getTranslation("en", "attendanceHistory") }
+      { key: "salary", label: getTranslation("en", "salary") }
     ],
     []
   );
@@ -380,7 +307,6 @@ export default function EmployeeWorkspace({ token, profile }) {
         {activePage === "projects" && <MyProjectPage token={token} />}
         {activePage === "schedule" && <SchedulePage token={token} />}
         {activePage === "salary" && <SalaryPage token={token} />}
-        {activePage === "history" && <HistoryPage token={token} />}
       </div>
     </section>
   );

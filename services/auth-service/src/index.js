@@ -26,7 +26,8 @@ const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "change_refresh_secret"
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
 const MAX_FAILED_LOGINS = Number(process.env.MAX_FAILED_LOGINS || 5);
 const LOCK_MINUTES = Number(process.env.LOGIN_LOCK_MINUTES || 30);
-const USER_ROLES = ["ADMIN", "MANAGER", "EMPLOYEE"];
+const EMPLOYEE_CODE_REGEX = /^[0-9]{8}$/;
+const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "HR_MANAGER", "PROJECT_MANAGER", "EMPLOYEE"];
 const ACCOUNT_STATUSES = ["ACTIVE", "INACTIVE", "LOCKED"];
 
 async function writeDataLog({ action, collection, recordId, username, metadata }) {
@@ -78,7 +79,8 @@ function authorize(...roles) {
   };
 }
 
-async function getAccountByEmail(email) {
+async function getAccountByEmployeeCode(employeeCode) {
+  const value = String(employeeCode || "").trim();
   const { rows } = await pool.query(
     `SELECT u.id,
             u.employee_code,
@@ -86,6 +88,7 @@ async function getAccountByEmail(email) {
             u.last_name,
             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
             u.email,
+            u.profile_image_url,
             a.role,
             a.password_hash,
             a.account_status,
@@ -93,8 +96,9 @@ async function getAccountByEmail(email) {
             a.locked_until
      FROM users u
      JOIN accounts a ON a.user_id = u.id
-     WHERE u.email = $1`,
-    [email]
+     WHERE UPPER(u.employee_code) = UPPER($1)
+       `,
+    [value]
   );
   return rows[0] || null;
 }
@@ -107,6 +111,7 @@ async function getAccountByUserId(userId) {
             u.last_name,
             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
             u.email,
+            u.profile_image_url,
             a.role,
             a.password_hash,
             a.account_status,
@@ -120,18 +125,38 @@ async function getAccountByUserId(userId) {
   return rows[0] || null;
 }
 
+async function getAccountRoleByUserId(userId) {
+  const result = await pool.query("SELECT role FROM accounts WHERE user_id = $1", [userId]);
+  if (result.rowCount === 0) {
+    return null;
+  }
+  return result.rows[0].role;
+}
+
+async function hasAnotherSuperAdmin(excludedUserId) {
+  const result = await pool.query(
+    "SELECT COUNT(*)::int AS total FROM accounts WHERE role = 'SUPER_ADMIN' AND user_id <> $1",
+    [excludedUserId]
+  );
+  return Number(result.rows[0]?.total || 0) > 0;
+}
+
 app.get("/health", (req, res) => {
   res.json({ service: "auth-service", status: "ok" });
 });
 
 app.post("/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email và mật khẩu is required" });
+    const employeeCode = String(req.body?.employeeCode || "").trim();
+    const password = req.body?.password;
+    if (!employeeCode || !password) {
+      return res.status(400).json({ message: "Employee code and password are required" });
+    }
+    if (!EMPLOYEE_CODE_REGEX.test(employeeCode)) {
+      return res.status(400).json({ message: "Employee code must be exactly 8 digits" });
     }
 
-    const user = await getAccountByEmail(email);
+    const user = await getAccountByEmployeeCode(employeeCode);
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -201,7 +226,8 @@ app.post("/auth/login", async (req, res) => {
         employeeCode: user.employee_code,
         fullName: user.full_name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        profileImageUrl: user.profile_image_url || ""
       }
     });
   } catch (error) {
@@ -319,8 +345,9 @@ app.put("/auth/me/password", authenticate, async (req, res) => {
   }
 });
 
-app.get("/auth/accounts", authenticate, authorize("ADMIN"), async (req, res) => {
+app.get("/auth/accounts", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
+    const isAdminRequester = req.user.role === "ADMIN";
     const { rows } = await pool.query(
       `SELECT u.id,
               u.employee_code,
@@ -338,7 +365,10 @@ app.get("/auth/accounts", authenticate, authorize("ADMIN"), async (req, res) => 
               a.updated_at
        FROM accounts a
        JOIN users u ON u.id = a.user_id
+       WHERE ($1::boolean = FALSE OR a.role <> 'SUPER_ADMIN')
        ORDER BY u.id DESC`
+      ,
+      [isAdminRequester]
     );
     return res.json(rows);
   } catch (error) {
@@ -346,13 +376,35 @@ app.get("/auth/accounts", authenticate, authorize("ADMIN"), async (req, res) => 
   }
 });
 
-app.put("/auth/accounts/:id/role", authenticate, authorize("ADMIN"), async (req, res) => {
+app.put("/auth/accounts/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { role } = req.body;
 
     if (!USER_ROLES.includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
+    }
+    const targetRole = await getAccountRoleByUserId(userId);
+    if (!targetRole) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+    if (targetRole === "SUPER_ADMIN" && req.user.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Super admin account is protected from management" });
+    }
+    if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
+      return res.status(403).json({ message: "Admin cannot modify another admin account" });
+    }
+    if (req.user.role === "ADMIN" && role === "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Only super admin can assign SUPER_ADMIN role" });
+    }
+    if (req.user.role === "ADMIN" && role === "ADMIN" && targetRole !== "ADMIN") {
+      return res.status(403).json({ message: "Admin cannot grant ADMIN role" });
+    }
+    if (Number(req.user.sub) === userId && role !== targetRole) {
+      return res.status(403).json({ message: "You cannot change your own role" });
+    }
+    if (role === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
+      return res.status(409).json({ message: "Only one SUPER_ADMIN account is allowed" });
     }
 
     const result = await pool.query(
@@ -377,13 +429,26 @@ app.put("/auth/accounts/:id/role", authenticate, authorize("ADMIN"), async (req,
   }
 });
 
-app.put("/auth/accounts/:id/status", authenticate, authorize("ADMIN"), async (req, res) => {
+app.put("/auth/accounts/:id/status", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { accountStatus, lockMinutes } = req.body;
 
     if (!ACCOUNT_STATUSES.includes(accountStatus)) {
       return res.status(400).json({ message: "Invalid account status" });
+    }
+    const targetRole = await getAccountRoleByUserId(userId);
+    if (!targetRole) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+    if (targetRole === "SUPER_ADMIN" && req.user.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Super admin account is protected from management" });
+    }
+    if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
+      return res.status(403).json({ message: "Admin cannot modify another admin account" });
+    }
+    if (Number(req.user.sub) === userId && accountStatus !== "ACTIVE") {
+      return res.status(403).json({ message: "You cannot lock or deactivate your own account" });
     }
 
     let lockUntil = null;
@@ -427,12 +492,22 @@ app.put("/auth/accounts/:id/status", authenticate, authorize("ADMIN"), async (re
   }
 });
 
-app.put("/auth/accounts/:id/password", authenticate, authorize("ADMIN"), async (req, res) => {
+app.put("/auth/accounts/:id/password", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { newPassword, unlockAccount } = req.body;
     if (!newPassword || String(newPassword).length < 6) {
       return res.status(400).json({ message: "newPassword là trường bắt buộc và phải có ít nhất 6 ký tự" });
+    }
+    const targetRole = await getAccountRoleByUserId(userId);
+    if (!targetRole) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+    if (targetRole === "SUPER_ADMIN" && req.user.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Super admin account is protected from management" });
+    }
+    if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
+      return res.status(403).json({ message: "Admin cannot modify another admin account" });
     }
 
     const passwordHash = await bcrypt.hash(String(newPassword), 10);
@@ -467,13 +542,36 @@ app.put("/auth/accounts/:id/password", authenticate, authorize("ADMIN"), async (
   }
 });
 
-app.put("/auth/users/:id/role", authenticate, authorize("ADMIN"), async (req, res) => {
+app.put("/auth/users/:id/role", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { role } = req.body;
 
     if (!USER_ROLES.includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
+    }
+
+    const targetRole = await getAccountRoleByUserId(userId);
+    if (!targetRole) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+    if (targetRole === "SUPER_ADMIN" && req.user.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Super admin account is protected from management" });
+    }
+    if (req.user.role === "ADMIN" && targetRole === "ADMIN" && Number(req.user.sub) !== userId) {
+      return res.status(403).json({ message: "Admin cannot modify another admin account" });
+    }
+    if (req.user.role === "ADMIN" && role === "SUPER_ADMIN") {
+      return res.status(403).json({ message: "Only super admin can assign SUPER_ADMIN role" });
+    }
+    if (req.user.role === "ADMIN" && role === "ADMIN" && targetRole !== "ADMIN") {
+      return res.status(403).json({ message: "Admin cannot grant ADMIN role" });
+    }
+    if (Number(req.user.sub) === userId && role !== targetRole) {
+      return res.status(403).json({ message: "You cannot change your own role" });
+    }
+    if (role === "SUPER_ADMIN" && await hasAnotherSuperAdmin(userId)) {
+      return res.status(409).json({ message: "Only one SUPER_ADMIN account is allowed" });
     }
 
     const result = await pool.query(

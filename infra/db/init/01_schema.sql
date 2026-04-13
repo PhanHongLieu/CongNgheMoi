@@ -1,14 +1,16 @@
 ﻿CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
-  employee_code VARCHAR(50) UNIQUE NOT NULL,
+  employee_code VARCHAR(8) UNIQUE NOT NULL,
   first_name VARCHAR(120),
   last_name VARCHAR(120),
   full_name VARCHAR(255) NOT NULL,
   phone VARCHAR(30),
   email VARCHAR(255) UNIQUE NOT NULL,
   gender VARCHAR(20),
+  status VARCHAR(20) NOT NULL DEFAULT 'WORKING' CHECK (status IN ('WORKING', 'RESIGNED')),
   birth_date DATE,
   address TEXT,
+  profile_image_url TEXT,
   face_template TEXT,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
@@ -17,6 +19,11 @@
 ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'WORKING';
+UPDATE users SET status = 'WORKING' WHERE status IS NULL OR TRIM(status) = '';
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
+ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('WORKING', 'RESIGNED'));
 
 UPDATE users
 SET
@@ -42,6 +49,56 @@ WHERE
 UPDATE users
 SET full_name = COALESCE(NULLIF(TRIM(CONCAT_WS(' ', last_name, first_name)), ''), full_name)
 WHERE full_name IS NULL OR TRIM(full_name) = '' OR full_name <> TRIM(CONCAT_WS(' ', last_name, first_name));
+
+-- Convert old employee_code formats (USR-xxx, ADMIN-xxx, MNG-xxx etc.) to 8-digit numeric format
+WITH existing AS (
+  SELECT COALESCE(MAX(employee_code::INT), 0) AS max_code
+  FROM users
+  WHERE employee_code ~ '^[0-9]{8}$'
+),
+ordered AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn
+  FROM users
+  WHERE employee_code !~ '^[0-9]{8}$'
+)
+UPDATE users
+SET employee_code = LPAD((existing.max_code + ordered.rn)::text, 8, '0')
+FROM existing, ordered
+WHERE users.id = ordered.id;
+
+ALTER TABLE users DROP COLUMN IF EXISTS legacy_employee_code;
+
+UPDATE users
+SET employee_code = LPAD(id::text, 8, '0')
+WHERE employee_code IS NULL OR employee_code !~ '^[0-9]{8}$';
+
+ALTER TABLE users ALTER COLUMN employee_code TYPE VARCHAR(8);
+ALTER TABLE users ALTER COLUMN employee_code SET NOT NULL;
+
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_employee_code_format_chk;
+ALTER TABLE users
+ADD CONSTRAINT users_employee_code_format_chk CHECK (employee_code ~ '^[0-9]{8}$');
+
+CREATE SEQUENCE IF NOT EXISTS users_employee_code_seq;
+
+DO $$
+DECLARE
+  max_code INTEGER;
+BEGIN
+  SELECT COALESCE(MAX(employee_code::INTEGER), 0)
+  INTO max_code
+  FROM users
+  WHERE employee_code ~ '^[0-9]{8}$';
+
+  IF max_code < 1 THEN
+    PERFORM setval('users_employee_code_seq', 1, false);
+  ELSE
+    PERFORM setval('users_employee_code_seq', max_code, true);
+  END IF;
+END $$;
+
+ALTER TABLE users
+ALTER COLUMN employee_code SET DEFAULT LPAD(nextval('users_employee_code_seq')::text, 8, '0');
 
 DO $$
 BEGIN
@@ -89,7 +146,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS accounts (
   id SERIAL PRIMARY KEY,
   user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role VARCHAR(20) NOT NULL CHECK (role IN ('ADMIN', 'MANAGER', 'EMPLOYEE')),
+  role VARCHAR(20) NOT NULL CHECK (role IN ('SUPER_ADMIN', 'ADMIN', 'HR_MANAGER', 'PROJECT_MANAGER', 'EMPLOYEE')),
   password_hash TEXT NOT NULL,
   account_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (account_status IN ('ACTIVE', 'INACTIVE', 'LOCKED')),
   failed_login_attempts INTEGER NOT NULL DEFAULT 0,
@@ -104,6 +161,13 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT 
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP DEFAULT NOW();
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_role_check;
+ALTER TABLE accounts
+ADD CONSTRAINT accounts_role_check CHECK (role IN ('SUPER_ADMIN', 'ADMIN', 'HR_MANAGER', 'PROJECT_MANAGER', 'EMPLOYEE'));
+
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_single_super_admin_idx
+ON accounts ((role))
+WHERE role = 'SUPER_ADMIN';
 
 DO $$
 BEGIN
@@ -129,7 +193,14 @@ BEGIN
       )
       SELECT
         u.id,
-        COALESCE(u.role, 'EMPLOYEE'),
+        COALESCE(
+          CASE
+            WHEN u.role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+            WHEN u.role = 'MANAGER' THEN 'PROJECT_MANAGER'
+            ELSE u.role
+          END,
+          'EMPLOYEE'
+        ),
         u.password_hash,
         COALESCE(u.account_status, 'ACTIVE'),
         COALESCE(u.failed_login_attempts, 0),
@@ -375,7 +446,6 @@ CREATE TABLE IF NOT EXISTS employee_locations (
 );
 
 INSERT INTO users (
-  employee_code,
   first_name,
   last_name,
   full_name,
@@ -387,7 +457,6 @@ INSERT INTO users (
 )
 VALUES
 (
-  'ADMIN-001',
   'System',
   'Admin',
   'System Admin',
@@ -398,7 +467,6 @@ VALUES
   'Ho Chi Minh City'
 ),
 (
-  'MNG-001',
   'Project',
   'Manager',
   'Project Manager',
@@ -409,7 +477,6 @@ VALUES
   'Binh Duong'
 ),
 (
-  'WRK-001',
   'Field',
   'Worker',
   'Field Worker',
@@ -418,6 +485,16 @@ VALUES
   'Male',
   DATE '1998-01-01',
   'Binh Duong'
+),
+(
+  'System',
+  'Operator',
+  'System Operator',
+  '0900000003',
+  'itadmin@mdp.local',
+  'Male',
+  DATE '1993-01-01',
+  'Ho Chi Minh City'
 )
 ON CONFLICT (email) DO UPDATE
 SET
@@ -446,8 +523,9 @@ SELECT
 FROM users u
 JOIN (
   VALUES
-    ('admin@mdp.local', 'ADMIN', '$2a$10$T./B9G0J/z.Ticy/7HJ9DuCtVbfpI7Kf8Y2xLzCfabu1r4MMic6OC'),
-    ('manager@mdp.local', 'MANAGER', '$2a$10$BfR9b1ObSlhcIHolEtReRu1qbsz/NtolgLDlPM3vN11/K003epmv6'),
+    ('admin@mdp.local', 'SUPER_ADMIN', '$2a$10$T./B9G0J/z.Ticy/7HJ9DuCtVbfpI7Kf8Y2xLzCfabu1r4MMic6OC'),
+    ('itadmin@mdp.local', 'ADMIN', '$2a$10$T./B9G0J/z.Ticy/7HJ9DuCtVbfpI7Kf8Y2xLzCfabu1r4MMic6OC'),
+    ('manager@mdp.local', 'PROJECT_MANAGER', '$2a$10$BfR9b1ObSlhcIHolEtReRu1qbsz/NtolgLDlPM3vN11/K003epmv6'),
     ('worker@mdp.local', 'EMPLOYEE', '$2a$10$ofuomNtMJ2zLeRsbSg4RyuDsALDled063dhLK0NCacSXXdJvsdhyC')
 ) AS seed(email, role, password_hash)
   ON u.email = seed.email
@@ -456,6 +534,47 @@ SET
   role = EXCLUDED.role,
   password_hash = EXCLUDED.password_hash,
   updated_at = NOW();
+
+UPDATE accounts
+SET role = CASE
+  WHEN role = 'SYSADMIN' THEN 'SUPER_ADMIN'
+  WHEN role = 'MANAGER' THEN 'PROJECT_MANAGER'
+  ELSE role
+END,
+updated_at = NOW();
+
+UPDATE accounts a
+SET role = 'SUPER_ADMIN',
+    updated_at = NOW()
+FROM users u
+WHERE a.user_id = u.id
+  AND u.email = 'admin@mdp.local';
+
+UPDATE accounts a
+SET role = 'ADMIN',
+    updated_at = NOW()
+FROM users u
+WHERE a.user_id = u.id
+  AND u.email = 'itadmin@mdp.local';
+
+DO $$
+DECLARE
+  super_id INTEGER;
+  conflict_id INTEGER;
+BEGIN
+  SELECT id INTO super_id FROM users WHERE email = 'admin@mdp.local';
+  SELECT id INTO conflict_id FROM users WHERE employee_code = '00000001' AND id <> super_id LIMIT 1;
+
+  IF super_id IS NOT NULL THEN
+    IF conflict_id IS NOT NULL THEN
+      UPDATE users SET employee_code = '99999999' WHERE id = conflict_id;
+    END IF;
+    UPDATE users SET employee_code = '00000001' WHERE id = super_id;
+    IF conflict_id IS NOT NULL THEN
+      UPDATE users SET employee_code = '00000004' WHERE id = conflict_id;
+    END IF;
+  END IF;
+END $$;
 
 INSERT INTO projects (
   project_code,
@@ -479,6 +598,28 @@ VALUES (
 )
 ON CONFLICT (project_code) DO NOTHING;
 
+INSERT INTO projects (
+  project_code,
+  name,
+  address,
+  latitude,
+  longitude,
+  start_date,
+  end_date,
+  status
+)
+VALUES (
+  'PRJ-GPS-TEST',
+  'GPS Attendance Test Site',
+  'Mock GPS test location',
+  10.857453,
+  106.667651,
+  CURRENT_DATE,
+  CURRENT_DATE + INTERVAL '30 days',
+  'IN_PROGRESS'
+)
+ON CONFLICT (project_code) DO NOTHING;
+
 INSERT INTO project_assignments (
   user_id,
   project_id,
@@ -495,6 +636,26 @@ SELECT
 FROM users worker
 JOIN projects project ON project.project_code = 'PRJ-001'
 WHERE worker.email = 'worker@mdp.local'
+ON CONFLICT (user_id, project_id) DO NOTHING;
+
+INSERT INTO project_assignments (
+  user_id,
+  project_id,
+  assignment_role,
+  work_start,
+  work_end
+)
+SELECT
+  u.id,
+  project.id,
+  'GPS Test Worker',
+  NOW(),
+  NOW() + INTERVAL '30 days'
+FROM users u
+JOIN accounts a ON a.user_id = u.id
+JOIN projects project ON project.project_code = 'PRJ-GPS-TEST'
+WHERE a.role = 'EMPLOYEE'
+  AND COALESCE(u.status, 'WORKING') = 'WORKING'
 ON CONFLICT (user_id, project_id) DO NOTHING;
 
 INSERT INTO salaries (
