@@ -29,6 +29,64 @@ const LOCK_MINUTES = Number(process.env.LOGIN_LOCK_MINUTES || 30);
 const EMPLOYEE_CODE_REGEX = /^[0-9]{8}$/;
 const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "HR_MANAGER", "PROJECT_MANAGER", "EMPLOYEE"];
 const ACCOUNT_STATUSES = ["ACTIVE", "INACTIVE", "LOCKED"];
+const RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
+const RECAPTCHA_SECRET_KEY = String(process.env.RECAPTCHA_SECRET_KEY || "").trim();
+const RECAPTCHA_MIN_SCORE = Number(process.env.RECAPTCHA_MIN_SCORE || 0.3);
+const RECAPTCHA_EXPECTED_ACTION = String(process.env.RECAPTCHA_EXPECTED_ACTION || "login").trim();
+const RECAPTCHA_MODE = String(process.env.RECAPTCHA_MODE || "v2_checkbox").trim().toLowerCase();
+
+async function verifyGoogleRecaptcha(recaptchaToken, remoteIp, expectedAction) {
+  const token = String(recaptchaToken || "").trim();
+  if (!token) {
+    return { ok: false, message: "Google reCAPTCHA is required" };
+  }
+  if (!RECAPTCHA_SECRET_KEY) {
+    return { ok: false, message: "reCAPTCHA is not configured on server", status: 500 };
+  }
+
+  try {
+    const form = new URLSearchParams();
+    form.set("secret", RECAPTCHA_SECRET_KEY);
+    form.set("response", token);
+    if (remoteIp) {
+      form.set("remoteip", String(remoteIp));
+    }
+
+    const response = await fetch(RECAPTCHA_VERIFY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString()
+    });
+
+    if (!response.ok) {
+      return { ok: false, message: "Unable to verify reCAPTCHA. Please try again." };
+    }
+
+    const data = await response.json();
+    if (!data?.success) {
+      return { ok: false, message: "Google reCAPTCHA verification failed" };
+    }
+
+    if (RECAPTCHA_MODE === "v3_score") {
+      if (typeof data.score !== "number") {
+        return { ok: false, message: "Google reCAPTCHA v3 score is missing" };
+      }
+      if (data.score < RECAPTCHA_MIN_SCORE) {
+        return { ok: false, message: "Google reCAPTCHA score is too low" };
+      }
+      if (expectedAction) {
+        const action = String(data.action || "").trim();
+        if (!action || action !== expectedAction) {
+          return { ok: false, message: "Google reCAPTCHA action is invalid" };
+        }
+      }
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: `reCAPTCHA verification error: ${error.message}` };
+  }
+}
 
 function normalizeRole(role) {
   const value = String(role || "").trim().toUpperCase();
@@ -188,8 +246,13 @@ app.post("/auth/login", async (req, res) => {
   try {
     const employeeCode = String(req.body?.employeeCode || "").trim();
     const password = req.body?.password;
+    const recaptchaToken = req.body?.recaptchaToken;
     if (!employeeCode || !password) {
       return res.status(400).json({ message: "Employee code and password are required" });
+    }
+    const captchaCheck = await verifyGoogleRecaptcha(recaptchaToken, req.ip, RECAPTCHA_EXPECTED_ACTION);
+    if (!captchaCheck.ok) {
+      return res.status(captchaCheck.status || 400).json({ message: captchaCheck.message });
     }
     if (!EMPLOYEE_CODE_REGEX.test(employeeCode)) {
       return res.status(400).json({ message: "Employee code must be exactly 8 digits" });

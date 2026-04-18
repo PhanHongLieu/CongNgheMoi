@@ -12,6 +12,8 @@ import {
 
 const API_BASE = "http://localhost:8080/api";
 const FACE_MODEL_URL = `${import.meta.env.BASE_URL || "/"}models`;
+const RECAPTCHA_SITE_KEY = String(import.meta.env.VITE_RECAPTCHA_SITE_KEY || "").trim();
+const RECAPTCHA_ACTION = import.meta.env.VITE_RECAPTCHA_ACTION || "login";
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -141,6 +143,8 @@ function isTokenExpired(token) {
 export default function App() {
   const [employeeCode, setEmployeeCode] = useState("00000004");
   const [password, setPassword] = useState("admin123");
+  const [recaptchaToken, setRecaptchaToken] = useState("");
+  const [recaptchaReady, setRecaptchaReady] = useState(false);
   const [token, setToken] = useState("");
   const [profile, setProfile] = useState(null);
   const [message, setMessage] = useState(getTranslation("en", "loginMessage"));
@@ -180,6 +184,8 @@ export default function App() {
   const faceVideoRef = useRef(null);
   const faceCanvasRef = useRef(null);
   const faceOverlayRef = useRef(null);
+  const recaptchaContainerRef = useRef(null);
+  const recaptchaWidgetIdRef = useRef(null);
   const faceDetectTimerRef = useRef(null);
   const faceCaptureLockRef = useRef(false);
   const faceLastCaptureAtRef = useRef(0);
@@ -544,13 +550,106 @@ export default function App() {
     []
   );
 
+  const resetGoogleRecaptcha = () => {
+    setRecaptchaToken("");
+    if (window.grecaptcha && recaptchaWidgetIdRef.current != null) {
+      window.grecaptcha.reset(recaptchaWidgetIdRef.current);
+    }
+  };
+
+  useEffect(() => {
+    if (token) {
+      return;
+    }
+    if (!RECAPTCHA_SITE_KEY) {
+      setRecaptchaReady(false);
+      setMessage("Google reCAPTCHA is not configured. Please set VITE_RECAPTCHA_SITE_KEY.");
+      return;
+    }
+
+    let cancelled = false;
+    let observedScript = null;
+    setRecaptchaReady(false);
+    setRecaptchaToken("");
+
+    const desiredSrc = "https://www.google.com/recaptcha/api.js?render=explicit";
+
+    const renderWidget = () => {
+      if (cancelled || !window.grecaptcha || !recaptchaContainerRef.current) {
+        return;
+      }
+      if (recaptchaWidgetIdRef.current == null) {
+        recaptchaWidgetIdRef.current = window.grecaptcha.render(recaptchaContainerRef.current, {
+          sitekey: RECAPTCHA_SITE_KEY,
+          callback: (value) => setRecaptchaToken(String(value || "")),
+          "expired-callback": () => setRecaptchaToken(""),
+          "error-callback": () => setRecaptchaToken("")
+        });
+      }
+      setRecaptchaReady(true);
+    };
+
+    const handleLoad = () => {
+      if (!window.grecaptcha) {
+        return;
+      }
+      window.grecaptcha.ready(renderWidget);
+    };
+
+    const handleError = () => {
+      if (!cancelled) {
+        setMessage("Unable to load Google reCAPTCHA script");
+      }
+    };
+
+    let script = document.getElementById("google-recaptcha-script");
+    if (script && script.getAttribute("src") !== desiredSrc) {
+      script.remove();
+      script = null;
+    }
+
+    if (!script) {
+      script = document.createElement("script");
+      script.id = "google-recaptcha-script";
+      script.src = desiredSrc;
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    }
+
+    observedScript = script;
+
+    handleLoad();
+    if (!window.grecaptcha) {
+      observedScript.addEventListener("load", handleLoad);
+      observedScript.addEventListener("error", handleError);
+    }
+
+    return () => {
+      cancelled = true;
+      if (observedScript) {
+        observedScript.removeEventListener("load", handleLoad);
+        observedScript.removeEventListener("error", handleError);
+      }
+    };
+  }, [token]);
+
   const login = async (event) => {
     event.preventDefault();
+    if (!recaptchaReady) {
+      setMessage("Google reCAPTCHA is still loading. Please try again in a moment.");
+      return;
+    }
+    if (!recaptchaToken) {
+      setMessage("Please complete Google reCAPTCHA");
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ employeeCode, password })
+        body: JSON.stringify({ employeeCode, password, recaptchaToken })
       });
 
       const rawBody = await response.text();
@@ -562,6 +661,7 @@ export default function App() {
       }
 
       if (!response.ok) {
+        resetGoogleRecaptcha();
         if (data?.lockedUntil) {
           const lockUntilText = new Date(data.lockedUntil).toLocaleString();
           setMessage(`${data.message || "Account is locked."} Locked until: ${lockUntilText}`);
@@ -573,10 +673,12 @@ export default function App() {
 
       setToken(data.accessToken);
       setProfile(data.user);
+      setRecaptchaToken("");
       localStorage.setItem("mdp_access_token", data.accessToken);
       localStorage.setItem("mdp_profile", JSON.stringify(data.user));
       setMessage(`Logged in successfully as ${data.user.role}`);
     } catch (error) {
+      resetGoogleRecaptcha();
       setMessage(`Connection error: ${error.message}`);
     }
   };
@@ -1031,6 +1133,11 @@ export default function App() {
                     required
                   />
                 </label>
+                <div className="grid gap-2 rounded-xl border border-steel/15 bg-white px-3 py-3 text-sm text-graphite/80">
+                  <span className="font-medium text-graphite">Google reCAPTCHA</span>
+                  <div ref={recaptchaContainerRef} className="min-h-[78px]" />
+                  {!recaptchaReady && <p className="text-xs text-graphite/70">Loading reCAPTCHA widget...</p>}
+                </div>
                 <button className="rounded-xl bg-gradient-to-r from-steel to-emerald-600 px-4 py-2.5 font-semibold text-white hover:shadow-lg transition-all" type="submit">
                   {getTranslation("en", "loginBtn")}
                 </button>

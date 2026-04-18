@@ -12,6 +12,7 @@
   address TEXT,
   profile_image_url TEXT,
   face_template TEXT,
+  hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -21,6 +22,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_url TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'WORKING';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000;
 UPDATE users SET status = 'WORKING' WHERE status IS NULL OR TRIM(status) = '';
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
 ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('WORKING', 'RESIGNED'));
@@ -310,6 +312,26 @@ CREATE TABLE IF NOT EXISTS salaries (
   updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(user_id, month, year)
 );
+
+CREATE TABLE IF NOT EXISTS holidays (
+  id SERIAL PRIMARY KEY,
+  holiday_date DATE NOT NULL UNIQUE,
+  holiday_name VARCHAR(255) NOT NULL,
+  multiplier NUMERIC(6,2) NOT NULL DEFAULT 1,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_holidays_active_date
+ON holidays (holiday_date)
+WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_user_project_time
+ON attendance_logs (user_id, project_id, check_in_time, check_out_time);
+
+CREATE INDEX IF NOT EXISTS idx_project_assignments_user_project_window
+ON project_assignments (user_id, project_id, work_start, work_end);
 
 CREATE TABLE IF NOT EXISTS project_progress_updates (
   id SERIAL PRIMARY KEY,

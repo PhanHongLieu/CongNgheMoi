@@ -67,6 +67,12 @@ function toDateTimeLocalValue(value) {
   return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
 }
 
+function toDateOnlyValue(value) {
+  if (!value) return "";
+  const text = String(value);
+  return text.length >= 10 ? text.slice(0, 10) : "";
+}
+
 function formatCurrencyVnd(amount) {
   const value = Number(amount || 0);
   return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(value);
@@ -789,17 +795,30 @@ function SalaryManagementPage({ token }) {
   const now = new Date();
   const [month, setMonth] = useState(String(now.getMonth() + 1));
   const [year, setYear] = useState(String(now.getFullYear()));
+  const [holidayMode, setHolidayMode] = useState("exclude");
   const [keyword, setKeyword] = useState("");
   const [standardHours, setStandardHours] = useState("208");
   const [hourlyRate, setHourlyRate] = useState("35000");
   const [overtimeMultiplier, setOvertimeMultiplier] = useState("1.5");
   const [rows, setRows] = useState([]);
+  const [holidays, setHolidays] = useState([]);
+  const [holidayFilterFrom, setHolidayFilterFrom] = useState(`${now.getFullYear()}-01-01`);
+  const [holidayFilterTo, setHolidayFilterTo] = useState(`${now.getFullYear()}-12-31`);
+  const [holidayFilterStatus, setHolidayFilterStatus] = useState("all");
+  const [holidayForm, setHolidayForm] = useState({
+    id: null,
+    holidayDate: "",
+    holidayName: "",
+    multiplier: "1",
+    isActive: true
+  });
 
   const loadSalaryManagement = useCallback(async () => {
     try {
       const query = new URLSearchParams();
       query.set("month", String(month));
       query.set("year", String(year));
+      query.set("holidayMode", holidayMode);
       if (keyword.trim()) {
         query.set("keyword", keyword.trim());
       }
@@ -809,11 +828,41 @@ function SalaryManagementPage({ token }) {
     } catch (error) {
       setStatus(`Failed to load salary management: ${error.message}`);
     }
-  }, [token, month, year, keyword]);
+  }, [token, month, year, keyword, holidayMode]);
+
+  const loadHolidays = useCallback(async () => {
+    try {
+      const query = new URLSearchParams();
+      if (holidayFilterFrom) {
+        query.set("from", holidayFilterFrom);
+      }
+      if (holidayFilterTo) {
+        query.set("to", holidayFilterTo);
+      }
+      if (holidayFilterStatus === "active") {
+        query.set("isActive", "true");
+      }
+      if (holidayFilterStatus === "inactive") {
+        query.set("isActive", "false");
+      }
+
+      const queryText = query.toString();
+      const data = await apiRequest(`/users/holidays${queryText ? `?${queryText}` : ""}`, token);
+      setHolidays(Array.isArray(data) ? data : []);
+    } catch (error) {
+      setStatus(`Failed to load holidays: ${error.message}`);
+    }
+  }, [token, holidayFilterFrom, holidayFilterTo, holidayFilterStatus]);
+
+  useEffect(() => {
+    setHolidayFilterFrom(`${year}-01-01`);
+    setHolidayFilterTo(`${year}-12-31`);
+  }, [year]);
 
   useEffect(() => {
     loadSalaryManagement();
-  }, [loadSalaryManagement]);
+    loadHolidays();
+  }, [loadSalaryManagement, loadHolidays]);
 
   const runSalaryCalculation = async (persist) => {
     try {
@@ -825,6 +874,7 @@ function SalaryManagementPage({ token }) {
           standardHours: Number(standardHours),
           hourlyRate: Number(hourlyRate),
           overtimeMultiplier: Number(overtimeMultiplier),
+          holidayMode,
           dryRun: !persist
         },
         successMessage: persist ? "Salary calculated and saved" : "Salary preview recalculated"
@@ -832,6 +882,77 @@ function SalaryManagementPage({ token }) {
       await loadSalaryManagement();
     } catch (error) {
       setStatus(`Salary calculation failed: ${error.message}`);
+    }
+  };
+
+  const submitHolidayForm = async () => {
+    if (!holidayForm.holidayDate || !holidayForm.holidayName.trim()) {
+      setStatus("Holiday date and name are required");
+      return;
+    }
+
+    const payload = {
+      holidayDate: holidayForm.holidayDate,
+      holidayName: holidayForm.holidayName.trim(),
+      multiplier: Number(holidayForm.multiplier || 1),
+      isActive: Boolean(holidayForm.isActive)
+    };
+
+    if (!Number.isFinite(payload.multiplier) || payload.multiplier <= 0) {
+      setStatus("Holiday multiplier must be a positive number");
+      return;
+    }
+
+    try {
+      if (holidayForm.id) {
+        await apiRequest(`/users/holidays/${holidayForm.id}`, token, {
+          method: "PUT",
+          body: payload,
+          successMessage: "Holiday updated"
+        });
+      } else {
+        await apiRequest("/users/holidays", token, {
+          method: "POST",
+          body: payload,
+          successMessage: "Holiday created"
+        });
+      }
+
+      setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true });
+      await loadHolidays();
+      await loadSalaryManagement();
+    } catch (error) {
+      setStatus(`Failed to save holiday: ${error.message}`);
+    }
+  };
+
+  const editHoliday = (holiday) => {
+    setHolidayForm({
+      id: holiday.id,
+      holidayDate: toDateOnlyValue(holiday.holiday_date),
+      holidayName: String(holiday.holiday_name || ""),
+      multiplier: String(holiday.multiplier ?? 1),
+      isActive: Boolean(holiday.is_active)
+    });
+  };
+
+  const removeHoliday = async (holiday) => {
+    if (!window.confirm(`Delete holiday ${holiday.holiday_name} (${toDateOnlyValue(holiday.holiday_date)})?`)) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/users/holidays/${holiday.id}`, token, {
+        method: "DELETE",
+        successMessage: "Holiday deleted"
+      });
+      if (holidayForm.id === holiday.id) {
+        setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true });
+      }
+      await loadHolidays();
+      await loadSalaryManagement();
+    } catch (error) {
+      setStatus(`Failed to delete holiday: ${error.message}`);
     }
   };
 
@@ -883,6 +1004,16 @@ function SalaryManagementPage({ token }) {
           <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="1" step="0.1" value={overtimeMultiplier} onChange={(e) => setOvertimeMultiplier(e.target.value)} placeholder="OT multiplier" />
         </div>
 
+        <div className="mt-2 grid gap-2 md:grid-cols-3">
+          <label className="grid gap-1 text-sm text-graphite">
+            Holiday policy
+            <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={holidayMode} onChange={(e) => setHolidayMode(e.target.value)}>
+              <option value="exclude">Exclude holiday hours</option>
+              <option value="multiplier">Apply holiday multiplier</option>
+            </select>
+          </label>
+        </div>
+
         <div className="mt-3 flex flex-wrap gap-2">
           <button type="button" onClick={loadSalaryManagement} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
             Refresh List
@@ -893,6 +1024,145 @@ function SalaryManagementPage({ token }) {
           <button type="button" onClick={() => runSalaryCalculation(true)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">
             Calculate & Save Salary
           </button>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <h3 className="text-lg font-bold text-steel">Holiday Management (HR)</h3>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={loadHolidays} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
+              Apply Filters
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setHolidayFilterFrom(`${year}-01-01`);
+                setHolidayFilterTo(`${year}-12-31`);
+                setHolidayFilterStatus("all");
+              }}
+              className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold"
+            >
+              Clear Filters
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-3 grid gap-2 md:grid-cols-3">
+          <label className="grid gap-1 text-sm text-graphite">
+            From date
+            <input
+              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
+              type="date"
+              value={holidayFilterFrom}
+              onChange={(e) => setHolidayFilterFrom(e.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-graphite">
+            To date
+            <input
+              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
+              type="date"
+              value={holidayFilterTo}
+              onChange={(e) => setHolidayFilterTo(e.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-graphite">
+            Status
+            <select
+              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
+              value={holidayFilterStatus}
+              onChange={(e) => setHolidayFilterStatus(e.target.value)}
+            >
+              <option value="all">All</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="grid gap-2 md:grid-cols-5">
+          <input
+            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
+            type="date"
+            value={holidayForm.holidayDate}
+            onChange={(e) => setHolidayForm((prev) => ({ ...prev, holidayDate: e.target.value }))}
+          />
+          <input
+            className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-2"
+            value={holidayForm.holidayName}
+            onChange={(e) => setHolidayForm((prev) => ({ ...prev, holidayName: e.target.value }))}
+            placeholder="Holiday name"
+          />
+          <input
+            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={holidayForm.multiplier}
+            onChange={(e) => setHolidayForm((prev) => ({ ...prev, multiplier: e.target.value }))}
+            placeholder="Multiplier"
+          />
+          <label className="flex items-center gap-2 rounded-lg border border-steel/20 px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={holidayForm.isActive}
+              onChange={(e) => setHolidayForm((prev) => ({ ...prev, isActive: e.target.checked }))}
+            />
+            Active
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" onClick={submitHolidayForm} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">
+            {holidayForm.id ? "Update Holiday" : "Create Holiday"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true })}
+            className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold"
+          >
+            Clear Form
+          </button>
+        </div>
+
+        <div className="mt-4 overflow-x-auto">
+          <table className="min-w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-steel/15 bg-steel/5">
+                <th className="p-3">Date</th>
+                <th className="p-3">Holiday Name</th>
+                <th className="p-3">Multiplier</th>
+                <th className="p-3">Status</th>
+                <th className="p-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {holidays.map((holiday) => (
+                <tr key={holiday.id} className="border-b border-steel/10">
+                  <td className="p-3">{toDateOnlyValue(holiday.holiday_date)}</td>
+                  <td className="p-3">{holiday.holiday_name}</td>
+                  <td className="p-3">{holiday.multiplier}</td>
+                  <td className="p-3">{holiday.is_active ? "Active" : "Inactive"}</td>
+                  <td className="p-3">
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => editHoliday(holiday)} className="rounded-lg border border-steel/20 px-2 py-1 text-xs hover:bg-slate-50">
+                        Edit
+                      </button>
+                      <button type="button" onClick={() => removeHoliday(holiday)} className="rounded-lg border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50">
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {holidays.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-4 text-center text-graphite/60">No holidays found for selected year.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -968,7 +1238,7 @@ export default function AdminWorkspace({ token }) {
       <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
         {activePage === "personnel" && <PersonnelPage token={token} />}
         {activePage === "attendance" && <AttendanceManagementPage token={token} />}
-        {activePage === "salary" && <SalaryManagement token={token} />}
+        {activePage === "salary" && <SalaryManagementPage token={token} />}
       </div>
     </section>
   );
