@@ -10,9 +10,14 @@ const port = Number(process.env.ATTENDANCE_SERVICE_PORT || 3004);
 const MAX_DISTANCE_METERS = Number(process.env.GPS_RADIUS_METERS || 100);
 const EMBEDDING_PASS_THRESHOLD = Number(process.env.FACE_EMBEDDING_THRESHOLD || 0.88);
 const SIGNATURE_PASS_THRESHOLD = Number(process.env.FACE_SIGNATURE_THRESHOLD || 0.76);
-const LIVENESS_PASS_THRESHOLD = Number(process.env.FACE_LIVENESS_THRESHOLD || 0.6);
+const LIVENESS_PASS_THRESHOLD = Number(process.env.FACE_LIVENESS_THRESHOLD || 0.3);
 const FACE_IMPOSTOR_EMBEDDING_MARGIN = Number(process.env.FACE_IMPOSTOR_EMBEDDING_MARGIN || 0.015);
 const FACE_IMPOSTOR_SIGNATURE_MARGIN = Number(process.env.FACE_IMPOSTOR_SIGNATURE_MARGIN || 0.03);
+const FACE_IMPOSTOR_MIN_POOL = Number(process.env.FACE_IMPOSTOR_MIN_POOL || 3);
+const FACE_IMPOSTOR_ABSOLUTE_FLOOR = Number(process.env.FACE_IMPOSTOR_ABSOLUTE_FLOOR || 0.9);
+const STANDARD_WORK_HOURS = Number(process.env.TIMESHEET_STANDARD_HOURS || 8);
+const HALF_WORK_HOURS = Number(process.env.TIMESHEET_HALF_DAY_HOURS || 4);
+const DEFAULT_LUNCH_BREAK_HOURS = Number(process.env.TIMESHEET_LUNCH_BREAK_HOURS || 1.5);
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
@@ -24,6 +29,156 @@ const pool = new Pool({
   user: process.env.POSTGRES_USER || "mdp_user",
   password: process.env.POSTGRES_PASSWORD || "mdp_password"
 });
+
+async function ensureAttendanceSchema() {
+  await pool.query(`
+    ALTER TABLE attendance_logs
+      ADD COLUMN IF NOT EXISTS face_mode VARCHAR(30),
+      ADD COLUMN IF NOT EXISTS liveness_score NUMERIC(6,4),
+      ADD COLUMN IF NOT EXISTS attendance_status VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS is_within_geofence_in BOOLEAN,
+      ADD COLUMN IF NOT EXISTS gps_distance_in_m NUMERIC(10,2),
+      ADD COLUMN IF NOT EXISTS is_within_geofence_out BOOLEAN,
+      ADD COLUMN IF NOT EXISTS gps_distance_out_m NUMERIC(10,2),
+      ADD COLUMN IF NOT EXISTS captured_device VARCHAR(80)
+  `);
+  await pool.query("ALTER TABLE attendance_logs DROP CONSTRAINT IF EXISTS attendance_logs_attendance_status_check");
+  await pool.query(`
+    ALTER TABLE attendance_logs
+    ADD CONSTRAINT attendance_logs_attendance_status_check
+    CHECK (attendance_status IN ('PRESENT', 'LATE', 'EARLY_LEAVE', 'ABSENT', 'ON_LEAVE', 'OPEN', 'COMPLETED', 'MISSING_OUT', 'INVALID'))
+  `);
+  await pool.query(`
+    UPDATE attendance_logs
+    SET attendance_status = CASE
+      WHEN check_out_time IS NOT NULL THEN 'COMPLETED'
+      WHEN check_in_time::date < CURRENT_DATE THEN 'MISSING_OUT'
+      ELSE 'OPEN'
+    END
+    WHERE attendance_status IS NULL
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS timesheets (
+      id SERIAL PRIMARY KEY,
+      attendance_log_id INTEGER UNIQUE REFERENCES attendance_logs(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      work_date DATE NOT NULL,
+      check_in_time TIMESTAMP,
+      check_out_time TIMESTAMP,
+      raw_work_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      break_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      actual_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      working_day_value NUMERIC(4,2) NOT NULL DEFAULT 0,
+      ot_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      timesheet_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      source VARCHAR(20) NOT NULL DEFAULT 'SYSTEM',
+      locked_by_request_id INTEGER REFERENCES requests(id) ON DELETE SET NULL,
+      notes TEXT,
+      computed_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_timesheets_user_work_date ON timesheets (user_id, work_date)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_timesheets_status ON timesheets (timesheet_status)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_timesheets_project_work_date ON timesheets (project_id, work_date)");
+}
+
+async function markMissingCheckouts() {
+  await pool.query(`
+    UPDATE attendance_logs
+    SET attendance_status = 'MISSING_OUT'
+    WHERE check_out_time IS NULL
+      AND check_in_time::date < CURRENT_DATE
+      AND COALESCE(attendance_status, 'OPEN') <> 'MISSING_OUT'
+  `);
+}
+
+function round2(value) {
+  return Number((Number(value || 0)).toFixed(2));
+}
+
+function computeTimesheetMetrics(row) {
+  const checkIn = row.check_in_time ? new Date(row.check_in_time) : null;
+  const checkOut = row.check_out_time ? new Date(row.check_out_time) : null;
+  const isMissingOut = !checkOut && checkIn && new Date(checkIn.toISOString().slice(0, 10)) < new Date(new Date().toISOString().slice(0, 10));
+  if (!checkIn || !checkOut || isMissingOut) {
+    return {
+      rawWorkHours: 0,
+      breakHours: 0,
+      actualHours: 0,
+      workingDayValue: 0,
+      otHours: 0,
+      timesheetStatus: isMissingOut ? "MISSING_OUT" : "PENDING",
+      note: isMissingOut ? "Missing check-out. Awaiting approved request." : "Pending check-out."
+    };
+  }
+
+  const rawWorkHours = Math.max((checkOut.getTime() - checkIn.getTime()) / 3600000, 0);
+  const breakHours = rawWorkHours >= 6 ? DEFAULT_LUNCH_BREAK_HOURS : 0;
+  const actualHours = Math.max(rawWorkHours - breakHours, 0);
+  const workingDayValue = actualHours >= STANDARD_WORK_HOURS ? 1 : actualHours >= HALF_WORK_HOURS ? 0.5 : 0;
+  const otHours = actualHours > STANDARD_WORK_HOURS ? actualHours - STANDARD_WORK_HOURS : 0;
+  return {
+    rawWorkHours: round2(rawWorkHours),
+    breakHours: round2(breakHours),
+    actualHours: round2(actualHours),
+    workingDayValue: round2(workingDayValue),
+    otHours: round2(otHours),
+    timesheetStatus: "READY",
+    note: null
+  };
+}
+
+async function recomputeTimesheets() {
+  const { rows } = await pool.query(`
+    SELECT id, user_id, project_id, check_in_time, check_out_time, attendance_status
+    FROM attendance_logs
+    WHERE check_in_time IS NOT NULL
+  `);
+
+  for (const row of rows) {
+    const metrics = computeTimesheetMetrics(row);
+    const workDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : null;
+    await pool.query(
+      `INSERT INTO timesheets
+      (attendance_log_id, user_id, project_id, work_date, check_in_time, check_out_time, raw_work_hours, break_hours, actual_hours, working_day_value, ot_hours, timesheet_status, source, notes, computed_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'SYSTEM',$13,NOW(),NOW())
+      ON CONFLICT (attendance_log_id)
+      DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        project_id = EXCLUDED.project_id,
+        work_date = EXCLUDED.work_date,
+        check_in_time = EXCLUDED.check_in_time,
+        check_out_time = EXCLUDED.check_out_time,
+        raw_work_hours = EXCLUDED.raw_work_hours,
+        break_hours = EXCLUDED.break_hours,
+        actual_hours = EXCLUDED.actual_hours,
+        working_day_value = EXCLUDED.working_day_value,
+        ot_hours = EXCLUDED.ot_hours,
+        timesheet_status = EXCLUDED.timesheet_status,
+        notes = EXCLUDED.notes,
+        computed_at = NOW(),
+        updated_at = NOW()
+      `,
+      [
+        row.id,
+        row.user_id,
+        row.project_id,
+        workDate,
+        row.check_in_time,
+        row.check_out_time,
+        metrics.rawWorkHours,
+        metrics.breakHours,
+        metrics.actualHours,
+        metrics.workingDayValue,
+        metrics.otHours,
+        metrics.timesheetStatus,
+        metrics.note
+      ]
+    );
+  }
+}
 
 app.use(helmet());
 app.use(cors());
@@ -115,13 +270,10 @@ function normalizeFaceSignature(value) {
 }
 
 function parseFaceTemplate(rawTemplate) {
-  const raw = String(rawTemplate || "").trim();
-  if (!raw || !raw.startsWith("{")) {
-    return { embeddings: [], signatures: [] };
-  }
-
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = typeof rawTemplate === "object" && rawTemplate !== null
+      ? rawTemplate
+      : JSON.parse(String(rawTemplate || "{}"));
     const embeddings = [];
     const signatures = [];
     const primaryEmbedding = normalizeEmbeddingVector(parsed?.primaryEmbedding);
@@ -228,7 +380,7 @@ function findBestImpostorScores(rows, incomingEmbedding, incomingSignature) {
   let bestSignatureScore = 0;
 
   for (const row of rows) {
-    const template = String(row?.face_template || "").trim();
+    const template = row?.face_template;
     if (!template) {
       continue;
     }
@@ -301,17 +453,23 @@ function validateLivenessPayload(payload) {
   if (elapsedMs == null || elapsedMs < 1200 || elapsedMs > 18000) {
     return { passed: false, message: "Liveness challenge timing is invalid" };
   }
-  const minFrames = type === "PASSIVE_FAST_V1" ? 4 : 6;
+  const minFrames = type === "PASSIVE_FAST_V1" ? 3 : 6;
   if (observedFrames == null || observedFrames < minFrames) {
     return { passed: false, message: "Insufficient liveness frames" };
   }
-  const minMovement = type === "PASSIVE_FAST_V1" ? 0.01 : 0.03;
-  if (movementScore == null || movementScore < minMovement) {
-    return { passed: false, message: "Head movement is insufficient" };
+  if (type !== "PASSIVE_FAST_V1") {
+    const minMovement = 0.03;
+    if (movementScore == null || movementScore < minMovement) {
+      return { passed: false, message: "Head movement is insufficient" };
+    }
   }
-  const minEyeDelta = type === "PASSIVE_FAST_V1" ? 0.01 : 0.02;
-  const minHappy = type === "PASSIVE_FAST_V1" ? 0.3 : 0.5;
-  if ((eyeOpenDelta == null || eyeOpenDelta < minEyeDelta) && (happyScoreMax == null || happyScoreMax < minHappy)) {
+  const minEyeDelta = type === "PASSIVE_FAST_V1" ? 0.005 : 0.02;
+  const minHappy = type === "PASSIVE_FAST_V1" ? 0.2 : 0.5;
+  if (
+    type !== "PASSIVE_FAST_V1" &&
+    (eyeOpenDelta == null || eyeOpenDelta < minEyeDelta) &&
+    (happyScoreMax == null || happyScoreMax < minHappy)
+  ) {
     return { passed: false, message: "No strong expression/eye signal detected" };
   }
 
@@ -359,6 +517,19 @@ async function assertProjectAssignment(userId, projectId, role) {
   return { ok: true };
 }
 
+async function getTodaySchedule(userId) {
+  const result = await pool.query(
+    `SELECT project_id, status
+     FROM employee_work_schedules
+     WHERE user_id = $1
+       AND work_date = CURRENT_DATE
+     ORDER BY shift_start_time ASC, id ASC
+     LIMIT 1`,
+    [userId]
+  );
+  return result.rows[0] || null;
+}
+
 async function verifyFaceForUser(userId, incomingEmbedding, incomingSignature, faceLiveness) {
   if (!Array.isArray(incomingEmbedding)) {
     return { ok: false, code: 400, message: "faceEmbedding is required" };
@@ -372,14 +543,17 @@ async function verifyFaceForUser(userId, incomingEmbedding, incomingSignature, f
     return { ok: false, code: 400, message: "faceEmbedding is invalid" };
   }
 
-  const userResult = await pool.query("SELECT id, face_template FROM users WHERE id = $1", [userId]);
+  const userResult = await pool.query("SELECT id, face_template, COALESCE(face_enrollment_status, 'UNREGISTERED') AS face_enrollment_status FROM users WHERE id = $1", [userId]);
   if (userResult.rowCount === 0) {
     return { ok: false, code: 404, message: "User not found" };
   }
 
-  const storedTemplate = String(userResult.rows[0].face_template || "").trim();
+  const storedTemplate = userResult.rows[0].face_template;
   if (!storedTemplate) {
     return { ok: false, code: 400, message: "Face template not registered. Please complete face enrollment first." };
+  }
+  if (userResult.rows[0].face_enrollment_status !== "APPROVED") {
+    return { ok: false, code: 403, message: "Face enrollment is not approved by HR yet." };
   }
 
   const livenessResult = validateLivenessPayload(faceLiveness);
@@ -407,19 +581,25 @@ async function verifyFaceForUser(userId, incomingEmbedding, incomingSignature, f
   }
 
   const impostorRows = await pool.query(
-    "SELECT face_template FROM users WHERE id <> $1 AND face_template IS NOT NULL AND TRIM(face_template) <> ''",
+    "SELECT face_template FROM users WHERE id <> $1 AND face_template IS NOT NULL AND COALESCE(face_enrollment_status, 'UNREGISTERED') = 'APPROVED'",
     [userId]
   );
   const impostorScores = findBestImpostorScores(impostorRows.rows || [], normalizedIncoming, normalizedSignature);
-  if (
-    impostorScores.bestEmbeddingScore >= embeddingMatch.score - FACE_IMPOSTOR_EMBEDDING_MARGIN ||
-    impostorScores.bestSignatureScore >= signatureMatch.score - FACE_IMPOSTOR_SIGNATURE_MARGIN
-  ) {
-    return {
-      ok: false,
-      code: 401,
-      message: "Face verification ambiguous. Please re-enroll with clearer samples."
-    };
+  const impostorPoolSize = Array.isArray(impostorRows.rows) ? impostorRows.rows.length : 0;
+  if (impostorPoolSize >= FACE_IMPOSTOR_MIN_POOL) {
+    const embeddingAmbiguous =
+      impostorScores.bestEmbeddingScore >= FACE_IMPOSTOR_ABSOLUTE_FLOOR &&
+      impostorScores.bestEmbeddingScore >= embeddingMatch.score - FACE_IMPOSTOR_EMBEDDING_MARGIN;
+    const signatureAmbiguous =
+      impostorScores.bestSignatureScore >= FACE_IMPOSTOR_ABSOLUTE_FLOOR &&
+      impostorScores.bestSignatureScore >= signatureMatch.score - FACE_IMPOSTOR_SIGNATURE_MARGIN;
+    if (embeddingAmbiguous || signatureAmbiguous) {
+      return {
+        ok: false,
+        code: 401,
+        message: "Face verification ambiguous. Please re-enroll with clearer samples."
+      };
+    }
   }
 
   return { ok: true, matchResult: embeddingMatch, signatureMatch, livenessResult };
@@ -449,6 +629,17 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
     if (!Array.isArray(incomingEmbedding)) {
       return res.status(400).json({ message: "faceEmbedding is required" });
     }
+    const todaySchedule = await getTodaySchedule(userId);
+    if (!todaySchedule) {
+      return res.status(403).json({ message: "No schedule found for today. Please contact your project manager." });
+    }
+    const scheduleStatus = String(todaySchedule.status || "").toUpperCase();
+    if (scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE") {
+      return res.status(403).json({ message: "Today is your day off. Attendance is locked." });
+    }
+    if (Number(todaySchedule.project_id) !== Number(projectId)) {
+      return res.status(403).json({ message: "Project does not match your assigned schedule for today." });
+    }
 
     const assignmentResult = await assertProjectAssignment(userId, projectId, req.user.role);
     if (!assignmentResult.ok) {
@@ -467,7 +658,9 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
       return res.status(400).json({ message: "Project location is not configured" });
     }
 
-    const allowedMeters = project.project_code === "PRJ-GPS-TEST" ? 500000 : MAX_DISTANCE_METERS;
+    const allowedMeters = project.project_code === "PRJ-GPS-TEST"
+      ? 500000
+      : (toNumber(project.gps_radius_meters) || MAX_DISTANCE_METERS);
     const distance = haversineDistanceMeters(latitude, longitude, projectLat, projectLng);
     if (distance > allowedMeters) {
       return res.status(400).json({
@@ -495,10 +688,22 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
 
     const insertResult = await pool.query(
       `INSERT INTO attendance_logs
-      (user_id, project_id, check_in_time, check_in_latitude, check_in_longitude, face_score)
-      VALUES ($1, $2, NOW(), $3, $4, $5)
+      (user_id, project_id, check_in_time, check_in_latitude, check_in_longitude, face_score, face_mode, liveness_score, attendance_status, is_within_geofence_in, gps_distance_in_m, captured_device)
+      VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *`,
-      [userId, projectId, latitude, longitude, matchResult.score]
+      [
+        userId,
+        projectId,
+        latitude,
+        longitude,
+        matchResult.score,
+        matchResult.mode,
+        livenessResult.score || null,
+        "OPEN",
+        true,
+        Number(distance.toFixed(2)),
+        String(req.body.device || "MOBILE_WEB").slice(0, 80)
+      ]
     );
 
     await writeDataLog({
@@ -543,6 +748,17 @@ app.post("/attendance/check-out", authenticate, async (req, res) => {
     if (!Array.isArray(incomingEmbedding)) {
       return res.status(400).json({ message: "faceEmbedding is required for check-out" });
     }
+    const todaySchedule = await getTodaySchedule(userId);
+    if (!todaySchedule) {
+      return res.status(403).json({ message: "No schedule found for today. Please contact your project manager." });
+    }
+    const scheduleStatus = String(todaySchedule.status || "").toUpperCase();
+    if (scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE") {
+      return res.status(403).json({ message: "Today is your day off. Attendance is locked." });
+    }
+    if (Number(todaySchedule.project_id) !== Number(projectId)) {
+      return res.status(403).json({ message: "Project does not match your assigned schedule for today." });
+    }
 
     const faceVerification = await verifyFaceForUser(userId, incomingEmbedding, incomingSignature, faceLiveness);
     if (!faceVerification.ok) {
@@ -552,14 +768,42 @@ app.post("/attendance/check-out", authenticate, async (req, res) => {
     }
     const { matchResult, signatureMatch, livenessResult } = faceVerification;
 
+    const projectResult = await resolveProject(projectId, latitude, longitude);
+    if (projectResult.error) {
+      return res.status(projectResult.error.code).json({ message: projectResult.error.message });
+    }
+    const project = projectResult.project;
+    const projectLat = toNumber(project.latitude);
+    const projectLng = toNumber(project.longitude);
+    if (projectLat == null || projectLng == null) {
+      return res.status(400).json({ message: "Project location is not configured" });
+    }
+    const allowedMeters = project.project_code === "PRJ-GPS-TEST"
+      ? 500000
+      : (toNumber(project.gps_radius_meters) || MAX_DISTANCE_METERS);
+    const distance = haversineDistanceMeters(latitude, longitude, projectLat, projectLng);
+    const isWithinGeofenceOut = distance <= allowedMeters;
+    if (!isWithinGeofenceOut) {
+      return res.status(400).json({
+        message: "Outside allowed GPS radius",
+        distanceMeters: Number(distance.toFixed(2)),
+        allowedMeters
+      });
+    }
+
     const updateResult = await pool.query(
       `UPDATE attendance_logs
        SET check_out_time = NOW(),
            check_out_latitude = $1,
-           check_out_longitude = $2
-       WHERE user_id = $3 AND project_id = $4 AND check_out_time IS NULL
+           check_out_longitude = $2,
+           is_within_geofence_out = $3,
+           gps_distance_out_m = $4,
+           attendance_status = 'COMPLETED',
+           face_mode = COALESCE(face_mode, $5),
+           liveness_score = COALESCE(liveness_score, $6)
+       WHERE user_id = $7 AND project_id = $8 AND check_out_time IS NULL
        RETURNING *`,
-      [latitude, longitude, userId, projectId]
+      [latitude, longitude, isWithinGeofenceOut, Number(distance.toFixed(2)), matchResult.mode, livenessResult.score || null, userId, projectId]
     );
 
     if (updateResult.rowCount === 0) {
@@ -784,6 +1028,7 @@ app.post("/attendance/location", authenticate, authorize("EMPLOYEE", "PROJECT_MA
     const latitude = toNumber(req.body.latitude);
     const longitude = toNumber(req.body.longitude);
     const source = String(req.body.source || "GPS").trim() || "GPS";
+    const accuracyMeters = req.body.accuracyMeters == null ? null : toNumber(req.body.accuracyMeters);
 
     if (latitude == null || longitude == null) {
       return res.status(400).json({ message: "latitude và longitude is required" });
@@ -800,10 +1045,10 @@ app.post("/attendance/location", authenticate, authorize("EMPLOYEE", "PROJECT_MA
     }
 
     const result = await pool.query(
-      `INSERT INTO employee_locations (user_id, project_id, latitude, longitude, source)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO employee_locations (user_id, project_id, latitude, longitude, accuracy_meters, source)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [req.user.sub, projectId, latitude, longitude, source]
+      [req.user.sub, projectId, latitude, longitude, accuracyMeters, source]
     );
 
     await writeDataLog({
@@ -961,7 +1206,30 @@ app.get("/attendance/reports/hr-summary", authenticate, authorize("HR_MANAGER"),
   }
 });
 
-app.listen(port, () => {
-  console.log(`attendance-service listening on ${port}`);
-});
+ensureAttendanceSchema()
+  .then(() => {
+    setInterval(() => {
+      markMissingCheckouts().catch((error) => {
+        console.error("markMissingCheckouts failed:", error.message);
+      });
+    }, 5 * 60 * 1000);
+    markMissingCheckouts().catch((error) => {
+      console.error("markMissingCheckouts initial run failed:", error.message);
+    });
+    setInterval(() => {
+      recomputeTimesheets().catch((error) => {
+        console.error("recomputeTimesheets failed:", error.message);
+      });
+    }, 30 * 60 * 1000);
+    recomputeTimesheets().catch((error) => {
+      console.error("recomputeTimesheets initial run failed:", error.message);
+    });
+    app.listen(port, () => {
+      console.log(`attendance-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("attendance-service startup failed:", error.message);
+    process.exit(1);
+  });
 

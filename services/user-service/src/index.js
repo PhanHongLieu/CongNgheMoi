@@ -5,6 +5,7 @@ const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { Pool } = require("pg");
+const Minio = require("minio");
 
 const app = express();
 const port = Number(process.env.USER_SERVICE_PORT || 3002);
@@ -30,10 +31,83 @@ const LUNCH_END_HOUR = Number(process.env.SALARY_LUNCH_END_HOUR || 13);
 const BUSINESS_END_HOUR = Number(process.env.SALARY_BUSINESS_END_HOUR || 17);
 const HOLIDAY_MODES = ["exclude", "multiplier"];
 const DEFAULT_HOLIDAY_MODE = String(process.env.SALARY_HOLIDAY_MODE || "exclude").trim().toLowerCase();
+const MINIO_ENDPOINT = process.env.MINIO_ENDPOINT || "minio";
+const MINIO_PORT = Number(process.env.MINIO_PORT || 9000);
+const MINIO_USE_SSL = String(process.env.MINIO_USE_SSL || "false").toLowerCase() === "true";
+const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || process.env.MINIO_ROOT_USER || "mdp_minio";
+const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || process.env.MINIO_ROOT_PASSWORD || "mdp_minio_password";
+const MINIO_BUCKET = process.env.MINIO_BUCKET || "face-enrollments";
+const MINIO_PUBLIC_BASE_URL = process.env.MINIO_PUBLIC_BASE_URL || "http://localhost:9000";
 
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+
+const minioClient = new Minio.Client({
+  endPoint: MINIO_ENDPOINT,
+  port: MINIO_PORT,
+  useSSL: MINIO_USE_SSL,
+  accessKey: MINIO_ACCESS_KEY,
+  secretKey: MINIO_SECRET_KEY
+});
+
+async function ensureFaceEnrollmentSchema() {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'users'
+          AND column_name = 'face_template'
+          AND data_type <> 'jsonb'
+      ) THEN
+        EXECUTE 'ALTER TABLE users ALTER COLUMN face_template TYPE JSONB USING CASE WHEN face_template IS NULL OR TRIM(face_template) = '''' THEN NULL ELSE face_template::jsonb END';
+      END IF;
+    END $$;
+  `);
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_status VARCHAR(20) NOT NULL DEFAULT 'UNREGISTERED'");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_submitted_at TIMESTAMP");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_reviewed_at TIMESTAMP");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_note TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title VARCHAR(120)");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS skill_level VARCHAR(30)");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS trade_code VARCHAR(30)");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS specialization VARCHAR(120)");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title_id INTEGER");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_titles (
+      id SERIAL PRIMARY KEY,
+      code VARCHAR(40) UNIQUE NOT NULL,
+      name VARCHAR(120) NOT NULL,
+      category VARCHAR(80),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_job_title_id_fkey");
+  await pool.query("ALTER TABLE users ADD CONSTRAINT users_job_title_id_fkey FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE SET NULL");
+  await pool.query("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_face_enrollment_status_check");
+  await pool.query(
+    "ALTER TABLE users ADD CONSTRAINT users_face_enrollment_status_check CHECK (face_enrollment_status IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED'))"
+  );
+  await pool.query(`
+    UPDATE users
+    SET face_enrollment_status = CASE
+      WHEN face_template IS NULL THEN 'UNREGISTERED'
+      ELSE 'APPROVED'
+    END
+    WHERE face_enrollment_status IS NULL
+       OR face_enrollment_status NOT IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED')
+  `);
+  const exists = await minioClient.bucketExists(MINIO_BUCKET).catch(() => false);
+  if (!exists) {
+    await minioClient.makeBucket(MINIO_BUCKET, "us-east-1");
+  }
+}
 
 async function writeDataLog({ action, collection, recordId, username, metadata }) {
   try {
@@ -105,24 +179,28 @@ function normalizeNameInput(firstName, lastName, fullName) {
 }
 
 function normalizeFaceTemplatePayload(input) {
-  const raw = String(input || "").trim();
-  if (!raw) {
+  const raw = typeof input === "string" ? input.trim() : "";
+  const parsedInput = typeof input === "object" && input !== null ? input : null;
+  if (!raw && !parsedInput) {
     return { error: "faceTemplate is required" };
   }
 
-  if (!raw.startsWith("{")) {
-    return { value: raw, metadata: { mode: "raw", sampleCount: 0, version: null } };
-  }
-
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = parsedInput || JSON.parse(raw);
     const primaryTemplate = String(parsed?.primaryTemplate || "").trim();
     const primaryEmbedding = normalizeEmbeddingVector(parsed?.primaryEmbedding);
     if (!primaryTemplate && primaryEmbedding.length === 0) {
       return { error: "faceTemplate requires primaryTemplate or primaryEmbedding" };
     }
 
-    const samples = parsed && typeof parsed.samples === "object" && parsed.samples !== null ? parsed.samples : {};
+    const sampleUrlsInput = parsed && typeof parsed.sampleUrls === "object" && parsed.sampleUrls !== null ? parsed.sampleUrls : {};
+    const sampleUrls = {};
+    for (const [key, value] of Object.entries(sampleUrlsInput)) {
+      const url = String(value || "").trim();
+      if (/^https?:\/\//i.test(url)) {
+        sampleUrls[key] = url;
+      }
+    }
     const signatures = parsed && typeof parsed.signatures === "object" && parsed.signatures !== null ? parsed.signatures : {};
     const embeddingsInput = parsed && typeof parsed.embeddings === "object" && parsed.embeddings !== null ? parsed.embeddings : {};
     const normalizedEmbeddings = {};
@@ -158,24 +236,24 @@ function normalizeFaceTemplatePayload(input) {
       primarySignature: String(parsed?.primarySignature || "").trim(),
       primaryEmbedding,
       embeddingDim: resolvedEmbeddingDim,
-      samples,
+      sampleUrls,
       signatures,
       embeddings: normalizedEmbeddings,
       livenessProfile: parsed?.livenessProfile && typeof parsed.livenessProfile === "object" ? parsed.livenessProfile : null
     };
 
     return {
-      value: JSON.stringify(normalized),
+      value: normalized,
       metadata: {
         mode: "json",
-        sampleCount: Object.keys(samples).length,
+        sampleUrlCount: Object.keys(sampleUrls).length,
         version: normalized.version,
         embeddingDim: normalized.embeddingDim,
         hasEmbedding: primaryEmbedding.length > 0
       }
     };
   } catch {
-    return { error: "faceTemplate must be valid JSON or raw image string" };
+    return { error: "faceTemplate must be valid JSON" };
   }
 }
 
@@ -221,111 +299,48 @@ function normalizeHolidayMode(input) {
   return HOLIDAY_MODES.includes(mode) ? mode : "exclude";
 }
 
+function parseDataUrl(input) {
+  const value = String(input || "").trim();
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const mimeType = match[1].toLowerCase();
+  const base64 = match[2];
+  const extMap = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp"
+  };
+  const extension = extMap[mimeType];
+  if (!extension) {
+    return null;
+  }
+  const buffer = Buffer.from(base64, "base64");
+  if (!buffer.length) {
+    return null;
+  }
+  return { buffer, mimeType, extension };
+}
+
 function buildAttendanceMetricsQuery(includeUserFilter) {
-  const userFilterClause = includeUserFilter ? "AND a.user_id = $7" : "";
-  return `WITH valid_logs AS (
+  const userFilterClause = includeUserFilter ? "AND t.user_id = $3" : "";
+  return `WITH classified AS (
             SELECT
-              a.user_id,
-              GREATEST(a.check_in_time, COALESCE(pa.work_start, a.check_in_time), $1::timestamp) AS start_at,
-              LEAST(a.check_out_time, COALESCE(pa.work_end, a.check_out_time), $2::timestamp) AS end_at
-            FROM attendance_logs a
-            JOIN project_assignments pa
-              ON pa.user_id = a.user_id
-             AND pa.project_id = a.project_id
-            WHERE a.check_in_time IS NOT NULL
-              AND a.check_out_time IS NOT NULL
-              AND a.check_out_time > a.check_in_time
-              AND a.check_in_time < $2::timestamp
-              AND a.check_out_time > $1::timestamp
-              ${userFilterClause}
-          ),
-          expanded AS (
-            SELECT
-              v.user_id,
-              gs.day_start,
-              GREATEST(v.start_at, gs.day_start) AS segment_start,
-              LEAST(v.end_at, gs.day_start + INTERVAL '1 day') AS segment_end
-            FROM valid_logs v
-            CROSS JOIN LATERAL generate_series(
-              date_trunc('day', v.start_at),
-              date_trunc('day', v.end_at),
-              INTERVAL '1 day'
-            ) AS gs(day_start)
-          ),
-          segments AS (
-            SELECT
-              user_id,
-              day_start::date AS work_day,
-              segment_start,
-              segment_end
-            FROM expanded
-            WHERE segment_end > segment_start
-          ),
-          per_segment AS (
-            SELECT
-              s.user_id,
-              s.work_day,
-              EXTRACT(EPOCH FROM (s.segment_end - s.segment_start)) / 3600.0 AS total_hours,
-              GREATEST(
-                EXTRACT(EPOCH FROM (
-                  LEAST(
-                    s.segment_end,
-                    s.work_day::timestamp + make_interval(hours => $4)
-                  ) - GREATEST(
-                    s.segment_start,
-                    s.work_day::timestamp + make_interval(hours => $3)
-                  )
-                )) / 3600.0,
-                0
-              )
-              +
-              GREATEST(
-                EXTRACT(EPOCH FROM (
-                  LEAST(
-                    s.segment_end,
-                    s.work_day::timestamp + make_interval(hours => $6)
-                  ) - GREATEST(
-                    s.segment_start,
-                    s.work_day::timestamp + make_interval(hours => $5)
-                  )
-                )) / 3600.0,
-                0
-              ) AS regular_hours,
-              GREATEST(
-                EXTRACT(EPOCH FROM (
-                  LEAST(
-                    s.segment_end,
-                    s.work_day::timestamp + make_interval(hours => $5)
-                  ) - GREATEST(
-                    s.segment_start,
-                    s.work_day::timestamp + make_interval(hours => $4)
-                  )
-                )) / 3600.0,
-                0
-              ) AS lunch_hours
-            FROM segments s
-          ),
-          per_day AS (
-            SELECT
-              user_id,
-              work_day,
-              SUM(total_hours) AS total_hours,
-              SUM(regular_hours) AS regular_hours,
-              SUM(lunch_hours) AS lunch_hours
-            FROM per_segment
-            GROUP BY user_id, work_day
-          ),
-          classified AS (
-            SELECT
-              pd.user_id,
-              pd.work_day,
-              LEAST(pd.regular_hours, GREATEST(pd.total_hours - pd.lunch_hours, 0)) AS worked_hours,
-              GREATEST(pd.total_hours - pd.lunch_hours - LEAST(pd.regular_hours, GREATEST(pd.total_hours - pd.lunch_hours, 0)), 0) AS overtime_hours,
+              t.user_id,
+              t.work_date,
+              GREATEST(COALESCE(t.actual_hours, 0) - COALESCE(t.ot_hours, 0), 0) AS worked_hours,
+              COALESCE(t.ot_hours, 0) AS overtime_hours,
               h.multiplier AS holiday_multiplier
-            FROM per_day pd
+            FROM timesheets t
             LEFT JOIN holidays h
-              ON h.holiday_date = pd.work_day
+              ON h.holiday_date = t.work_date
              AND h.is_active = TRUE
+            WHERE t.work_date >= $1::date
+              AND t.work_date <= $2::date
+              AND t.timesheet_status IN ('READY', 'LOCKED', 'APPROVED')
+              ${userFilterClause}
           ),
           aggregated AS (
             SELECT
@@ -341,21 +356,14 @@ function buildAttendanceMetricsQuery(includeUserFilter) {
           ),
           invalid AS (
             SELECT
-              a.user_id,
+              t.user_id,
               COUNT(*)::int AS missing_logs
-            FROM attendance_logs a
-            JOIN project_assignments pa
-              ON pa.user_id = a.user_id
-             AND pa.project_id = a.project_id
-            WHERE (
-                a.check_in_time IS NULL
-                OR a.check_out_time IS NULL
-                OR a.check_out_time <= a.check_in_time
-              )
-              AND COALESCE(a.check_in_time, a.check_out_time) < $2::timestamp
-              AND COALESCE(a.check_out_time, a.check_in_time, $1::timestamp) > $1::timestamp
+            FROM timesheets t
+            WHERE t.work_date >= $1::date
+              AND t.work_date <= $2::date
+              AND t.timesheet_status IN ('MISSING_OUT', 'PENDING', 'INVALID')
               ${userFilterClause}
-            GROUP BY a.user_id
+            GROUP BY t.user_id
           )
           SELECT
             COALESCE(ag.user_id, iv.user_id) AS user_id,
@@ -372,7 +380,7 @@ function buildAttendanceMetricsQuery(includeUserFilter) {
 
 async function loadAttendanceMetrics(monthStart, monthEnd, userId = null) {
   const includeUserFilter = userId != null;
-  const params = [monthStart, monthEnd, BUSINESS_START_HOUR, LUNCH_START_HOUR, LUNCH_END_HOUR, BUSINESS_END_HOUR];
+  const params = [monthStart, monthEnd];
   if (includeUserFilter) {
     params.push(userId);
   }
@@ -428,6 +436,11 @@ app.get("/users", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER"), asyn
               u.gender,
               u.birth_date,
               u.address,
+              u.job_title,
+              u.skill_level,
+              u.trade_code,
+              u.specialization,
+              u.job_title_id,
               u.profile_image_url,
               u.created_at,
               u.updated_at
@@ -459,7 +472,11 @@ app.get("/users/face-status", authenticate, authorize("HR_MANAGER"), async (req,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
               u.email,
               COALESCE(u.status, 'WORKING') AS status,
-              CASE WHEN u.face_template IS NULL OR TRIM(u.face_template) = '' THEN FALSE ELSE TRUE END AS has_face_template
+              CASE WHEN u.face_template IS NULL THEN FALSE ELSE TRUE END AS has_face_template,
+              COALESCE(u.face_enrollment_status, 'UNREGISTERED') AS face_enrollment_status,
+              u.face_enrollment_submitted_at,
+              u.face_enrollment_reviewed_at,
+              u.face_enrollment_reviewed_by
        FROM users u
        LEFT JOIN accounts a ON a.user_id = u.id
        WHERE COALESCE(a.role, 'EMPLOYEE') NOT IN ('SUPER_ADMIN', 'ADMIN')
@@ -714,8 +731,18 @@ app.get("/users/:id", authenticate, async (req, res) => {
               u.gender,
               u.birth_date,
               u.address,
+              u.job_title,
+              u.skill_level,
+              u.trade_code,
+              u.specialization,
+              u.job_title_id,
               u.profile_image_url,
               u.face_template,
+              COALESCE(u.face_enrollment_status, 'UNREGISTERED') AS face_enrollment_status,
+              u.face_enrollment_submitted_at,
+              u.face_enrollment_reviewed_at,
+              u.face_enrollment_reviewed_by,
+              u.face_enrollment_note,
               u.created_at,
               u.updated_at
        FROM users u
@@ -754,7 +781,12 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
       address,
       profileImageUrl,
       faceTemplate,
-      employmentStatus
+      employmentStatus,
+      jobTitle,
+      skillLevel,
+      tradeCode,
+      specialization,
+      jobTitleId
     } = req.body;
 
     const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
@@ -776,9 +808,9 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
     await client.query("BEGIN");
     const insertedUser = await client.query(
       `INSERT INTO users (
-        first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, face_template, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, created_at`,
+        first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, face_template, status, job_title, skill_level, trade_code, specialization, job_title_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, job_title_id, created_at`,
       [
         normalizedNames.firstName,
         normalizedNames.lastName,
@@ -790,7 +822,12 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
         address || null,
         profileImageUrl || null,
         faceTemplate || null,
-        normalizedEmploymentStatus
+        normalizedEmploymentStatus,
+        jobTitle || null,
+        skillLevel || null,
+        tradeCode || null,
+        specialization || null,
+        jobTitleId == null ? null : Number(jobTitleId)
       ]
     );
 
@@ -839,7 +876,7 @@ app.put("/users/:id", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "
     if (req.user.role === "EMPLOYEE" && req.user.sub !== userId) {
       return res.status(403).json({ message: "Forbidden" });
     }
-    const { firstName, lastName, fullName, phone, email, gender, birthDate, address, profileImageUrl, faceTemplate, employmentStatus } = req.body;
+    const { firstName, lastName, fullName, phone, email, gender, birthDate, address, profileImageUrl, faceTemplate, employmentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId } = req.body;
 
     const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
     const nextFirstName = normalizedNames.firstName || undefined;
@@ -872,10 +909,15 @@ app.put("/users/:id", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "
            profile_image_url = COALESCE($8, profile_image_url),
            face_template = COALESCE($9, face_template),
            status = COALESCE($10, status),
+           job_title = COALESCE($11, job_title),
+           skill_level = COALESCE($12, skill_level),
+           trade_code = COALESCE($13, trade_code),
+           specialization = COALESCE($14, specialization),
+           job_title_id = COALESCE($15, job_title_id),
            updated_at = NOW()
-       WHERE id = $11
-       RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, updated_at`,
-      [nextFirstName, nextLastName, phone, email, gender, normalizedBirthDate, address, profileImageUrl, faceTemplate, normalizedEmploymentStatus, userId]
+       WHERE id = $16
+       RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, job_title_id, updated_at`,
+      [nextFirstName, nextLastName, phone, email, gender, normalizedBirthDate, address, profileImageUrl, faceTemplate, normalizedEmploymentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId == null ? null : Number(jobTitleId), userId]
     );
 
     if (result.rowCount === 0) {
@@ -888,7 +930,7 @@ app.put("/users/:id", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "
       recordId: String(userId),
       username: req.user.email,
       metadata: {
-        changedFields: ["firstName", "lastName", "phone", "email", "gender", "birthDate", "address", "profileImageUrl", "faceTemplate"].filter(
+        changedFields: ["firstName", "lastName", "phone", "email", "gender", "birthDate", "address", "profileImageUrl", "faceTemplate", "jobTitle", "skillLevel", "tradeCode", "specialization", "jobTitleId"].filter(
           (field) => req.body[field] !== undefined
         )
       }
@@ -956,9 +998,22 @@ app.put("/users/:id/face-template", authenticate, authorize("HR_MANAGER", "PROJE
       return res.status(400).json({ message: normalizedTemplate.error });
     }
 
+    const submittedStatus = req.user.role === "HR_MANAGER" ? "APPROVED" : "PENDING";
     const result = await pool.query(
-      "UPDATE users SET face_template = $1, updated_at = NOW() WHERE id = $2 RETURNING id, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', last_name, first_name)), ''), full_name) AS full_name, face_template",
-      [normalizedTemplate.value, userId]
+      `UPDATE users
+       SET face_template = $1,
+           face_enrollment_status = $2::text,
+           face_enrollment_submitted_at = NOW(),
+           face_enrollment_reviewed_at = CASE WHEN $2::text = 'APPROVED' THEN NOW() ELSE NULL END,
+           face_enrollment_reviewed_by = CASE WHEN $2::text = 'APPROVED' THEN $3::int ELSE NULL END,
+           face_enrollment_note = CASE WHEN $2::text = 'APPROVED' THEN 'Approved on submit by HR' ELSE 'Waiting for HR approval' END,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id,
+                 COALESCE(NULLIF(TRIM(CONCAT_WS(' ', last_name, first_name)), ''), full_name) AS full_name,
+                 face_template,
+                 face_enrollment_status`,
+      [normalizedTemplate.value, submittedStatus, req.user.sub, userId]
     );
 
     if (result.rowCount === 0) {
@@ -973,9 +1028,98 @@ app.put("/users/:id/face-template", authenticate, authorize("HR_MANAGER", "PROJE
       metadata: normalizedTemplate.metadata
     });
 
-    return res.json({ message: "Face template saved to database", user: result.rows[0] });
+    return res.json({
+      message: submittedStatus === "APPROVED" ? "Face template approved and saved" : "Face template submitted. Waiting for HR approval",
+      user: result.rows[0]
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to update face template", error: error.message });
+  }
+});
+
+app.post("/users/:id/face-enrollment/samples-upload", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "EMPLOYEE"), async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    if (req.user.role === "EMPLOYEE" && req.user.sub !== userId) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    const samples = req.body?.samples;
+    if (!samples || typeof samples !== "object") {
+      return res.status(400).json({ message: "samples object is required" });
+    }
+
+    const parsedEntries = Object.entries(samples)
+      .map(([step, dataUrl]) => ({ step, parsed: parseDataUrl(dataUrl) }))
+      .filter((item) => Boolean(item.parsed));
+
+    const uploaded = await Promise.all(
+      parsedEntries.map(async ({ step, parsed }, index) => {
+        const objectName = `users/${userId}/${Date.now()}-${index}-${step}.${parsed.extension}`;
+        await minioClient.putObject(MINIO_BUCKET, objectName, parsed.buffer, parsed.buffer.length, {
+          "Content-Type": parsed.mimeType
+        });
+        return {
+          step,
+          url: `${MINIO_PUBLIC_BASE_URL.replace(/\/$/, "")}/${MINIO_BUCKET}/${objectName}`
+        };
+      })
+    );
+
+    const sampleUrls = Object.fromEntries(uploaded.map((item) => [item.step, item.url]));
+
+    if (Object.keys(sampleUrls).length === 0) {
+      return res.status(400).json({ message: "No valid image samples to upload" });
+    }
+
+    await writeDataLog({
+      action: "create",
+      collection: "face-enrollment-samples",
+      recordId: String(userId),
+      username: req.user.email,
+      metadata: { uploadedSteps: Object.keys(sampleUrls) }
+    });
+
+    return res.json({ message: "Face samples uploaded", sampleUrls });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to upload face samples", error: error.message });
+  }
+});
+
+app.put("/users/:id/face-enrollment/review", authenticate, authorize("HR_MANAGER"), async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const decision = String(req.body.decision || "").trim().toUpperCase();
+    const note = String(req.body.note || "").trim() || null;
+    if (!["APPROVED", "REJECTED"].includes(decision)) {
+      return res.status(400).json({ message: "decision must be APPROVED or REJECTED" });
+    }
+
+    const result = await pool.query(
+      `UPDATE users
+       SET face_enrollment_status = $1,
+           face_enrollment_reviewed_at = NOW(),
+           face_enrollment_reviewed_by = $2,
+           face_enrollment_note = $3,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, employee_code, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', last_name, first_name)), ''), full_name) AS full_name, face_enrollment_status`,
+      [decision, req.user.sub, note, userId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    await writeDataLog({
+      action: "update",
+      collection: "user-face-enrollment-review",
+      recordId: String(userId),
+      username: req.user.email,
+      metadata: { decision, note }
+    });
+
+    return res.json({ message: `Face enrollment ${decision.toLowerCase()} successfully`, user: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to review face enrollment", error: error.message });
   }
 });
 
@@ -985,10 +1129,15 @@ app.delete("/users/:id/face-template", authenticate, authorize("HR_MANAGER"), as
     const result = await pool.query(
       `UPDATE users
        SET face_template = NULL,
+           face_enrollment_status = 'UNREGISTERED',
+           face_enrollment_submitted_at = NULL,
+           face_enrollment_reviewed_at = NOW(),
+           face_enrollment_reviewed_by = $2,
+           face_enrollment_note = 'Template reset by HR',
            updated_at = NOW()
        WHERE id = $1
        RETURNING id, email`,
-      [userId]
+      [userId, req.user.sub]
     );
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "User not found" });
@@ -1134,7 +1283,7 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
             item.bonus,
             item.deductions,
             item.totalSalary,
-            `AUTO_CALCULATED_FROM_ATTENDANCE: workedHours=${item.workedHours}, overtimeHours=${item.overtimeHours}, holidayMode=${holidayMode}, missingLogs=${item.missingAttendanceLogs}, hourlyRate=${item.hourlyRate}`
+            `AUTO_CALCULATED_FROM_TIMESHEETS: workedHours=${item.workedHours}, overtimeHours=${item.overtimeHours}, holidayMode=${holidayMode}, missingLogs=${item.missingAttendanceLogs}, hourlyRate=${item.hourlyRate}`
           ]
         );
       }
@@ -1359,17 +1508,45 @@ async function ensureSalarySchema() {
       updated_at TIMESTAMP DEFAULT NOW()
     )`
   );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS timesheets (
+      id SERIAL PRIMARY KEY,
+      attendance_log_id INTEGER UNIQUE REFERENCES attendance_logs(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      work_date DATE NOT NULL,
+      check_in_time TIMESTAMP,
+      check_out_time TIMESTAMP,
+      raw_work_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      break_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      actual_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      working_day_value NUMERIC(4,2) NOT NULL DEFAULT 0,
+      ot_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+      timesheet_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      source VARCHAR(20) NOT NULL DEFAULT 'SYSTEM',
+      locked_by_request_id INTEGER REFERENCES requests(id) ON DELETE SET NULL,
+      notes TEXT,
+      computed_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
 
   await pool.query("CREATE INDEX IF NOT EXISTS idx_holidays_active_date ON holidays (holiday_date) WHERE is_active = TRUE");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_timesheets_user_work_date ON timesheets (user_id, work_date)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_timesheets_status ON timesheets (timesheet_status)");
   await pool.query("CREATE INDEX IF NOT EXISTS idx_attendance_logs_user_project_time ON attendance_logs (user_id, project_id, check_in_time, check_out_time)");
   await pool.query("CREATE INDEX IF NOT EXISTS idx_project_assignments_user_project_window ON project_assignments (user_id, project_id, work_start, work_end)");
 }
 
 async function start() {
   await ensureSalarySchema();
-  app.listen(port, () => {
-    console.log(`user-service listening on ${port}`);
-  });
+app.listen(port, () => {
+  console.log(`user-service listening on ${port}`);
+});
+
+ensureFaceEnrollmentSchema().catch((error) => {
+  console.error("ensureFaceEnrollmentSchema failed:", error.message);
+});
 }
 
 start().catch((error) => {

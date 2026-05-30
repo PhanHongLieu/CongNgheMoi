@@ -11,8 +11,18 @@
   birth_date DATE,
   address TEXT,
   profile_image_url TEXT,
-  face_template TEXT,
+  face_template JSONB,
+  face_enrollment_status VARCHAR(20) NOT NULL DEFAULT 'UNREGISTERED' CHECK (face_enrollment_status IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED')),
+  face_enrollment_submitted_at TIMESTAMP,
+  face_enrollment_reviewed_at TIMESTAMP,
+  face_enrollment_reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  face_enrollment_note TEXT,
   hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000,
+  job_title VARCHAR(120),
+  skill_level VARCHAR(30),
+  trade_code VARCHAR(30),
+  specialization VARCHAR(120),
+  job_title_id INTEGER,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -21,11 +31,57 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_status VARCHAR(20) NOT NULL DEFAULT 'UNREGISTERED';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_submitted_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_reviewed_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS face_enrollment_note TEXT;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'users'
+      AND column_name = 'face_template'
+      AND data_type <> 'jsonb'
+  ) THEN
+    EXECUTE 'ALTER TABLE users ALTER COLUMN face_template TYPE JSONB USING CASE WHEN face_template IS NULL OR TRIM(face_template) = '''' THEN NULL ELSE face_template::jsonb END';
+  END IF;
+END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'WORKING';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title VARCHAR(120);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS skill_level VARCHAR(30);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS trade_code VARCHAR(30);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS specialization VARCHAR(120);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title_id INTEGER;
+
+CREATE TABLE IF NOT EXISTS job_titles (
+  id SERIAL PRIMARY KEY,
+  code VARCHAR(40) UNIQUE NOT NULL,
+  name VARCHAR(120) NOT NULL,
+  category VARCHAR(80),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_job_title_id_fkey;
+ALTER TABLE users
+ADD CONSTRAINT users_job_title_id_fkey
+FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE SET NULL;
 UPDATE users SET status = 'WORKING' WHERE status IS NULL OR TRIM(status) = '';
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
 ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('WORKING', 'RESIGNED'));
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_face_enrollment_status_check;
+ALTER TABLE users ADD CONSTRAINT users_face_enrollment_status_check CHECK (face_enrollment_status IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED'));
+UPDATE users
+SET face_enrollment_status = CASE
+  WHEN face_template IS NULL THEN 'UNREGISTERED'
+  ELSE COALESCE(NULLIF(face_enrollment_status, ''), 'APPROVED')
+END
+WHERE face_enrollment_status IS NULL
+   OR face_enrollment_status NOT IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED');
 
 UPDATE users
 SET
@@ -245,20 +301,39 @@ CREATE TABLE IF NOT EXISTS projects (
   start_date DATE,
   end_date DATE,
   status VARCHAR(30) NOT NULL DEFAULT 'PLANNING',
+  gps_radius_meters INTEGER NOT NULL DEFAULT 100 CHECK (gps_radius_meters BETWEEN 30 AND 2000),
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS gps_radius_meters INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_gps_radius_meters_check;
+ALTER TABLE projects ADD CONSTRAINT projects_gps_radius_meters_check CHECK (gps_radius_meters BETWEEN 30 AND 2000);
 
 CREATE TABLE IF NOT EXISTS project_assignments (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
   assignment_role VARCHAR(100),
+  assignment_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (assignment_status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED')),
+  shift_code VARCHAR(30),
+  shift_start_time TIME,
+  shift_end_time TIME,
+  required_trade_code VARCHAR(30),
+  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   work_start TIMESTAMP,
   work_end TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(user_id, project_id)
 );
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS assignment_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_code VARCHAR(30);
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_start_time TIME;
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_end_time TIME;
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS required_trade_code VARCHAR(30);
+ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE project_assignments DROP CONSTRAINT IF EXISTS project_assignments_assignment_status_check;
+ALTER TABLE project_assignments
+ADD CONSTRAINT project_assignments_assignment_status_check CHECK (assignment_status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED'));
 
 CREATE TABLE IF NOT EXISTS attendance_logs (
   id SERIAL PRIMARY KEY,
@@ -271,17 +346,111 @@ CREATE TABLE IF NOT EXISTS attendance_logs (
   check_out_latitude DOUBLE PRECISION,
   check_out_longitude DOUBLE PRECISION,
   face_score DOUBLE PRECISION,
+  face_mode VARCHAR(30),
+  liveness_score NUMERIC(5,4),
+  is_within_geofence_in BOOLEAN,
+  is_within_geofence_out BOOLEAN,
+  gps_distance_in_m NUMERIC(10,2),
+  gps_distance_out_m NUMERIC(10,2),
+  attendance_status VARCHAR(20) NOT NULL DEFAULT 'PRESENT' CHECK (attendance_status IN ('PRESENT', 'LATE', 'EARLY_LEAVE', 'ABSENT', 'ON_LEAVE')),
+  note TEXT,
+  captured_device VARCHAR(80),
   created_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS face_mode VARCHAR(30);
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS liveness_score NUMERIC(5,4);
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS is_within_geofence_in BOOLEAN;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS is_within_geofence_out BOOLEAN;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS gps_distance_in_m NUMERIC(10,2);
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS gps_distance_out_m NUMERIC(10,2);
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS attendance_status VARCHAR(20) NOT NULL DEFAULT 'PRESENT';
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS captured_device VARCHAR(80);
+ALTER TABLE attendance_logs DROP CONSTRAINT IF EXISTS attendance_logs_attendance_status_check;
+ALTER TABLE attendance_logs
+ADD CONSTRAINT attendance_logs_attendance_status_check CHECK (attendance_status IN ('PRESENT', 'LATE', 'EARLY_LEAVE', 'ABSENT', 'ON_LEAVE', 'OPEN', 'COMPLETED', 'MISSING_OUT', 'INVALID'));
 
 CREATE TABLE IF NOT EXISTS notifications (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  sender_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  notification_type VARCHAR(40) NOT NULL DEFAULT 'SYSTEM',
+  priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')),
   title VARCHAR(255) NOT NULL,
   message TEXT NOT NULL,
+  action_url TEXT,
   status VARCHAR(20) DEFAULT 'UNREAD',
+  read_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sender_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(40) NOT NULL DEFAULT 'SYSTEM';
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL';
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMP;
+ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_priority_check;
+ALTER TABLE notifications ADD CONSTRAINT notifications_priority_check CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT'));
+
+CREATE TABLE IF NOT EXISTS requests (
+  id SERIAL PRIMARY KEY,
+  request_code VARCHAR(20) UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  type VARCHAR(40) NOT NULL CHECK (type IN ('leave', 'late', 'overtime', 'forgot_checkout')),
+  start_date DATE,
+  end_date DATE,
+  request_date DATE,
+  request_shift VARCHAR(30),
+  hours NUMERIC(5,2),
+  reason TEXT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+  approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewer_note TEXT,
+  approved_at TIMESTAMP,
+  attachment_url TEXT,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS timesheets (
+  id SERIAL PRIMARY KEY,
+  attendance_log_id INTEGER UNIQUE REFERENCES attendance_logs(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  work_date DATE NOT NULL,
+  check_in_time TIMESTAMP,
+  check_out_time TIMESTAMP,
+  raw_work_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+  break_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+  actual_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+  working_day_value NUMERIC(4,2) NOT NULL DEFAULT 0,
+  ot_hours NUMERIC(8,2) NOT NULL DEFAULT 0,
+  timesheet_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  source VARCHAR(20) NOT NULL DEFAULT 'SYSTEM',
+  locked_by_request_id INTEGER REFERENCES requests(id) ON DELETE SET NULL,
+  notes TEXT,
+  computed_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS employee_work_schedules (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  shift_code VARCHAR(30) NOT NULL,
+  shift_name VARCHAR(120),
+  shift_start_time TIME NOT NULL,
+  shift_end_time TIME NOT NULL,
+  work_date DATE NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'SCHEDULED' CHECK (status IN ('SCHEDULED', 'COMPLETED', 'CANCELLED', 'DAY_OFF', 'LEAVE')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (user_id, project_id, shift_code, work_date)
+);
+ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_status_check;
+ALTER TABLE employee_work_schedules
+ADD CONSTRAINT employee_work_schedules_status_check CHECK (status IN ('SCHEDULED', 'COMPLETED', 'CANCELLED', 'DAY_OFF', 'LEAVE'));
 
 CREATE TABLE IF NOT EXISTS data_logs (
   id SERIAL PRIMARY KEY,
@@ -332,6 +501,21 @@ ON attendance_logs (user_id, project_id, check_in_time, check_out_time);
 
 CREATE INDEX IF NOT EXISTS idx_project_assignments_user_project_window
 ON project_assignments (user_id, project_id, work_start, work_end);
+CREATE INDEX IF NOT EXISTS idx_timesheets_user_work_date ON timesheets (user_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_timesheets_status ON timesheets (timesheet_status);
+CREATE INDEX IF NOT EXISTS idx_timesheets_project_work_date ON timesheets (project_id, work_date);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_status_created
+ON notifications (user_id, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_requests_user_status_created
+ON requests (user_id, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_requests_project_type
+ON requests (project_id, type);
+
+CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_user_date
+ON employee_work_schedules (user_id, work_date);
 
 CREATE TABLE IF NOT EXISTS project_progress_updates (
   id SERIAL PRIMARY KEY,
@@ -463,9 +647,11 @@ CREATE TABLE IF NOT EXISTS employee_locations (
   project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
   latitude DOUBLE PRECISION NOT NULL,
   longitude DOUBLE PRECISION NOT NULL,
+  accuracy_meters NUMERIC(8,2),
   source VARCHAR(30) NOT NULL DEFAULT 'GPS',
   created_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE employee_locations ADD COLUMN IF NOT EXISTS accuracy_meters NUMERIC(8,2);
 
 INSERT INTO users (
   first_name,

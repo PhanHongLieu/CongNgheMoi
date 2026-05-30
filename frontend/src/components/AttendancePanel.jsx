@@ -1,10 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as faceapi from "face-api.js";
 import { computeFaceSignatureFromCanvas } from "../utils/faceEmbedding";
+import { MapContainer, TileLayer, Circle, Marker, Popup } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import L from "leaflet";
 
 const API_BASE = "http://localhost:8080/api";
-const MAX_GPS_RADIUS_METERS = 100;
+const DEFAULT_GPS_RADIUS_METERS = 100;
 const MODEL_URL = `${import.meta.env.BASE_URL || "/"}models`;
+const SCHEDULE_CACHE_KEY = "employee_schedule_cache_v1";
+const ATTENDANCE_QUEUE_KEY = "attendance_offline_queue_v1";
+
+// Custom icon for user location
+const userIcon = L.divIcon({
+  className: "custom-user-marker",
+  html: `<div style="background-color: #22c55e; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8]
+});
 
 function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -74,11 +87,12 @@ function eyeAspectRatio(eye) {
   return vertical / horizontal;
 }
 
-export default function AttendancePanel({ token, profile }) {
+export default function AttendancePanel({ token, profile, faceEnrollmentStatus }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const detectionTimerRef = useRef(null);
+  const gpsWatchIdRef = useRef(null);
   const lastDetectionRef = useRef(null);
   const scanRunIdRef = useRef(0);
   const activeScanTypeRef = useRef(null);
@@ -87,9 +101,12 @@ export default function AttendancePanel({ token, profile }) {
   const [streaming, setStreaming] = useState(false);
   const [scanVisible, setScanVisible] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
+  const [scanType, setScanType] = useState("");
+  const [scanCountdown, setScanCountdown] = useState(0);
   const [restartingCamera, setRestartingCamera] = useState(false);
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
+  const [todayScheduleStatus, setTodayScheduleStatus] = useState("");
   const [facePreview, setFacePreview] = useState("");
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [recognitionModelLoaded, setRecognitionModelLoaded] = useState(false);
@@ -97,6 +114,7 @@ export default function AttendancePanel({ token, profile }) {
 
   const [gpsCoords, setGpsCoords] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
+  const [frozenAttendanceCoords, setFrozenAttendanceCoords] = useState(null);
   const [historyRows, setHistoryRows] = useState([]);
   const [historyProjectFilter, setHistoryProjectFilter] = useState("");
   const [historyDateFilter, setHistoryDateFilter] = useState("");
@@ -104,6 +122,8 @@ export default function AttendancePanel({ token, profile }) {
 
   const [statusMsg, setStatusMsg] = useState("");
   const [statusType, setStatusType] = useState("idle");
+  const resolvedFaceEnrollmentStatus = String(faceEnrollmentStatus || "UNREGISTERED").toUpperCase();
+  const isFaceApproved = resolvedFaceEnrollmentStatus === "APPROVED";
 
   const setStatus = (msg, type = "idle") => {
     setStatusMsg(msg);
@@ -208,16 +228,59 @@ export default function AttendancePanel({ token, profile }) {
   useEffect(() => {
     const fetchProjects = async () => {
       try {
-        const response = await fetch(`${API_BASE}/projects/my`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await response.json();
-        const projectList = Array.isArray(data) ? data : [];
-        setProjects(projectList);
-        if (projectList.length > 0) {
-          setSelectedProject(String(projectList[0].id));
+        const [todayResponse, scheduleResponse] = await Promise.all([
+          fetch(`${API_BASE}/projects/schedule/today`, {
+            headers: { Authorization: `Bearer ${token}` }
+          }),
+          fetch(`${API_BASE}/projects/schedule`, {
+            headers: { Authorization: `Bearer ${token}` }
+          })
+        ]);
+        const todayData = await todayResponse.json();
+        const scheduleData = await scheduleResponse.json();
+        const projectList = Array.isArray(scheduleData) ? scheduleData : [];
+        // Transform schedule data to match expected project structure
+        const transformedProjects = projectList.map(item => ({
+          id: item.project_id,
+          project_code: item.project_code,
+          name: item.project_name,
+          status: item.project_status,
+          address: item.address,
+          latitude: item.latitude,
+          longitude: item.longitude,
+          gps_radius_meters: Number(item.gps_radius_meters || DEFAULT_GPS_RADIUS_METERS)
+        }));
+        setProjects(transformedProjects);
+        localStorage.setItem(SCHEDULE_CACHE_KEY, JSON.stringify({ projects: transformedProjects, today: todayData || null, updatedAt: Date.now() }));
+        if (todayData?.project_id) {
+          setSelectedProject(String(todayData.project_id));
+          setTodayScheduleStatus(String(todayData.schedule_status || "SCHEDULED").toUpperCase());
+        } else if (transformedProjects.length > 0) {
+          setSelectedProject(String(transformedProjects[0].id));
+          setTodayScheduleStatus("SCHEDULED");
+        } else {
+          setTodayScheduleStatus("");
         }
       } catch (error) {
+        const cache = localStorage.getItem(SCHEDULE_CACHE_KEY);
+        if (cache) {
+          try {
+            const parsed = JSON.parse(cache);
+            const cachedProjects = Array.isArray(parsed?.projects) ? parsed.projects : [];
+            setProjects(cachedProjects);
+            if (parsed?.today?.project_id) {
+              setSelectedProject(String(parsed.today.project_id));
+              setTodayScheduleStatus(String(parsed.today.schedule_status || "SCHEDULED").toUpperCase());
+            } else if (cachedProjects[0]?.id) {
+              setSelectedProject(String(cachedProjects[0].id));
+              setTodayScheduleStatus("SCHEDULED");
+            }
+            setStatus("Loaded cached schedule (offline mode).", "loading");
+            return;
+          } catch {
+            // ignore cache parsing errors
+          }
+        }
         setStatus(`Failed to load project list: ${error.message}`, "error");
       }
     };
@@ -266,11 +329,6 @@ export default function AttendancePanel({ token, profile }) {
       setRecognitionModelLoaded(true);
       setStreaming(true);
       setStatus("Camera ready. face-api models loaded.", "success");
-      try {
-        await fetchGPS();
-      } catch {
-        // Keep camera running even if GPS permission fails.
-      }
     } catch (error) {
       setRecognitionModelLoaded(false);
       setStatus(`Unable to access camera: ${error.message}`, "error");
@@ -397,7 +455,7 @@ export default function AttendancePanel({ token, profile }) {
     const expressionScore = Math.min(1, Math.max(eyeOpenDelta * 8, maxHappy));
     const stabilityScore = observedFrames >= 10 ? 1 : observedFrames >= 6 ? 0.8 : observedFrames >= 4 ? 0.6 : 0;
     const score = Number((stabilityScore * 0.45 + microMotionScore * 0.3 + expressionScore * 0.25).toFixed(4));
-    const passed = observedFrames >= 4 && (movement >= 0.01 || eyeOpenDelta >= 0.01 || maxHappy >= 0.3) && score >= 0.45;
+    const passed = observedFrames >= 3 && score >= 0.3;
 
     const payload = {
       passed,
@@ -413,7 +471,7 @@ export default function AttendancePanel({ token, profile }) {
       movementScore: Number(movement.toFixed(4)),
       eyeOpenDelta: Number(eyeOpenDelta.toFixed(4)),
       happyScoreMax: Number(maxHappy.toFixed(4)),
-      threshold: 0.45,
+      threshold: 0.3,
       capturedAt: new Date().toISOString(),
       elapsedMs: Date.now() - startedAt
     };
@@ -542,6 +600,36 @@ export default function AttendancePanel({ token, profile }) {
     [projects, selectedProject]
   );
 
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      return undefined;
+    }
+
+    setGpsLoading(true);
+    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        setGpsCoords({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          capturedAt: Date.now()
+        });
+        setGpsLoading(false);
+      },
+      () => {
+        setGpsLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
+    );
+
+    return () => {
+      if (gpsWatchIdRef.current != null && navigator.geolocation?.clearWatch) {
+        navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+        gpsWatchIdRef.current = null;
+      }
+    };
+  }, []);
+
   const gpsDistanceMeters = useMemo(() => {
     if (!gpsCoords || !selectedProjectData) {
       return null;
@@ -556,7 +644,14 @@ export default function AttendancePanel({ token, profile }) {
     return haversineDistanceMeters(gpsCoords.latitude, gpsCoords.longitude, projectLat, projectLng);
   }, [gpsCoords, selectedProjectData]);
 
-  const isWithinRadius = gpsDistanceMeters != null && gpsDistanceMeters <= MAX_GPS_RADIUS_METERS;
+  const effectiveRadiusMeters = useMemo(() => {
+    if (!selectedProjectData) return DEFAULT_GPS_RADIUS_METERS;
+    return Number(selectedProjectData.gps_radius_meters || DEFAULT_GPS_RADIUS_METERS);
+  }, [selectedProjectData]);
+
+  const isWithinRadius = gpsDistanceMeters != null && gpsDistanceMeters <= effectiveRadiusMeters;
+  const isDayOffOrLeave = todayScheduleStatus === "DAY_OFF" || todayScheduleStatus === "LEAVE";
+  const hasTodaySchedule = Boolean(selectedProjectData);
 
   const submitAttendance = async (type, runId = scanRunIdRef.current) => {
     const isCancelled = () => runId !== scanRunIdRef.current;
@@ -564,7 +659,7 @@ export default function AttendancePanel({ token, profile }) {
       if (isCancelled()) return false;
       retryAfterLivenessTypeRef.current = null;
       if (!selectedProject) {
-        setStatus("Please select a project before checking attendance", "error");
+        setStatus("No project assigned for today. Please contact your project manager.", "error");
         return false;
       }
       if (type === "in" && hasActiveCheckIn) {
@@ -620,22 +715,44 @@ export default function AttendancePanel({ token, profile }) {
       }
       setStatus("Face captured. Comparing with registered profile...", "loading");
 
-      setStatus("Acquiring GPS coordinates...", "loading");
-      const coords = await fetchGPS();
-      if (isCancelled()) return false;
       setStatus("Submitting attendance...", "loading");
+      if (!frozenAttendanceCoords || !Number.isFinite(Number(frozenAttendanceCoords.latitude)) || !Number.isFinite(Number(frozenAttendanceCoords.longitude))) {
+        setStatus("No frozen GPS snapshot found. Please close and press check-in again.", "error");
+        return false;
+      }
 
       const endpoint = type === "in" ? "check-in" : "check-out";
       const payload = {
         projectId: Number(selectedProject),
-        latitude: coords.latitude,
-        longitude: coords.longitude
+        latitude: Number(frozenAttendanceCoords.latitude),
+        longitude: Number(frozenAttendanceCoords.longitude)
       };
       payload.faceTemplate = faceForCheckIn;
       payload.faceEmbedding = faceEmbeddingForCheckIn;
       payload.faceSignature = faceSignatureForCheckIn;
       if (livenessPayload) {
         payload.faceLiveness = livenessPayload;
+      }
+      if (!navigator.onLine) {
+        let queue = [];
+        try {
+          const queueRaw = localStorage.getItem(ATTENDANCE_QUEUE_KEY);
+          const parsed = JSON.parse(queueRaw || "[]");
+          queue = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          queue = [];
+        }
+        queue.push({
+          endpoint,
+          payload,
+          token,
+          type,
+          queuedAt: Date.now()
+        });
+        localStorage.setItem(ATTENDANCE_QUEUE_KEY, JSON.stringify(queue));
+        setStatus(`${type === "in" ? "Check-in" : "Check-out"} queued offline. It will auto-sync when network is back.`, "success");
+        setHasActiveCheckIn(type === "in");
+        return true;
       }
 
       const response = await fetch(`${API_BASE}/attendance/${endpoint}`, {
@@ -683,21 +800,106 @@ export default function AttendancePanel({ token, profile }) {
 
   const beginAttendanceFlow = async (type) => {
     if (scanBusy || restartingCamera) return;
+    const frozenCoords = type === "in" ? (isWithinRadius ? gpsCoords : null) : gpsCoords;
+    if (!frozenCoords) {
+      setStatus(
+        type === "in"
+          ? "GPS is not ready or outside radius. Wait for sync and stand within project radius."
+          : "GPS is not ready yet. Please wait for sync and retry.",
+        "error"
+      );
+      return;
+    }
+    setFrozenAttendanceCoords({
+      latitude: Number(frozenCoords.latitude),
+      longitude: Number(frozenCoords.longitude),
+      accuracy: Number(frozenCoords.accuracy || 0),
+      capturedAt: Number(frozenCoords.capturedAt || Date.now())
+    });
+    setScanType(type);
     setScanVisible(true);
     activeScanTypeRef.current = type;
+    setScanCountdown(3);
+  };
+
+  useEffect(() => {
+    const flushQueue = async () => {
+      if (!navigator.onLine) return;
+      let queue = [];
+      try {
+        queue = JSON.parse(localStorage.getItem(ATTENDANCE_QUEUE_KEY) || "[]");
+      } catch {
+        queue = [];
+      }
+      if (!Array.isArray(queue) || queue.length === 0) return;
+
+      const remaining = [];
+      for (const item of queue) {
+        try {
+          const response = await fetch(`${API_BASE}/attendance/${item.endpoint}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${item.token}`
+            },
+            body: JSON.stringify(item.payload)
+          });
+          if (!response.ok) {
+            remaining.push(item);
+          }
+        } catch {
+          remaining.push(item);
+        }
+      }
+      localStorage.setItem(ATTENDANCE_QUEUE_KEY, JSON.stringify(remaining));
+      if (remaining.length === 0) {
+        loadAttendanceHistory();
+      }
+    };
+    window.addEventListener("online", flushQueue);
+    flushQueue();
+    return () => window.removeEventListener("online", flushQueue);
+  }, [loadAttendanceHistory]);
+
+  const closeScanModal = () => {
+    scanRunIdRef.current += 1;
+    activeScanTypeRef.current = null;
+    setScanType("");
+    setScanCountdown(0);
+    setFrozenAttendanceCoords(null);
+    stopCamera();
+    setScanVisible(false);
+    setScanBusy(false);
+  };
+
+  const confirmAttendanceScan = async () => {
+    if (!scanType || scanBusy || restartingCamera) return;
+    activeScanTypeRef.current = scanType;
     const runId = scanRunIdRef.current + 1;
     scanRunIdRef.current = runId;
     setScanBusy(true);
-    const ok = await submitAttendance(type, runId);
+    const ok = await submitAttendance(scanType, runId);
     if (scanRunIdRef.current === runId) {
       setScanBusy(false);
       activeScanTypeRef.current = null;
       if (ok) {
-        stopCamera();
-        setScanVisible(false);
+        closeScanModal();
       }
     }
   };
+
+  useEffect(() => {
+    if (!scanVisible || scanCountdown <= 0) {
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setScanCountdown((prev) => Math.max(prev - 1, 0));
+      if (scanCountdown === 1 && !streaming) {
+        await startCamera();
+      }
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [scanVisible, scanCountdown, streaming]);
 
   const filteredHistoryRows = useMemo(() => {
     return historyRows.filter((row) => {
@@ -736,16 +938,27 @@ export default function AttendancePanel({ token, profile }) {
       <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-xl font-bold text-steel">Attendance Check-in with GPS</h2>
+            <h2 className="text-xl font-bold text-steel">Face + GPS Attendance</h2>
             <p className="text-sm text-graphite/70">Employee: {profile?.fullName || "Employee"}</p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">GPS Radius: {MAX_GPS_RADIUS_METERS}m</span>
+            <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+              Distance: {gpsDistanceMeters == null ? "--" : `${gpsDistanceMeters.toFixed(2)} m${gpsDistanceMeters >= 1000 ? ` (${(gpsDistanceMeters / 1000).toFixed(3)} km)` : ""}`}
+            </span>
             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${hasActiveCheckIn ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
-              {hasActiveCheckIn ? "Status: Checked In" : "Status: Ready"}
+              {hasActiveCheckIn ? "✓ Checked In" : "○ Ready"}
+            </span>
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+              resolvedFaceEnrollmentStatus === "APPROVED"
+                ? "bg-emerald-50 text-emerald-700"
+                : resolvedFaceEnrollmentStatus === "PENDING"
+                  ? "bg-amber-50 text-amber-700"
+                  : "bg-red-50 text-red-700"
+            }`}>
+              {resolvedFaceEnrollmentStatus === "APPROVED" ? "Face ID Approved" : resolvedFaceEnrollmentStatus === "PENDING" ? "Face ID Pending" : "Face ID Unregistered"}
             </span>
             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${modelsLoaded && recognitionModelLoaded ? "bg-cyan-50 text-cyan-700" : "bg-slate-100 text-slate-600"}`}>
-              {modelsLoaded && recognitionModelLoaded ? "Face ID Ready" : "Face ID Not Ready"}
+              {modelsLoaded && recognitionModelLoaded ? "Face Ready" : "Face Loading"}
             </span>
           </div>
         </div>
@@ -756,23 +969,22 @@ export default function AttendancePanel({ token, profile }) {
       <div className="space-y-4">
         <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h3 className="font-semibold text-steel">Project</h3>
+            <h3 className="font-semibold text-steel">Today's Project</h3>
             <span className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${gpsLoading ? "bg-blue-100 text-blue-700" : "bg-emerald-100 text-emerald-700"}`}>
               {gpsLoading ? "Syncing GPS..." : "GPS Auto Sync"}
             </span>
           </div>
-          <select
-            className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm text-graphite focus:outline-none focus:ring-2 focus:ring-steel/30"
-            value={selectedProject}
-            onChange={(e) => setSelectedProject(e.target.value)}
-          >
-            {projects.length === 0 && <option value="">No assigned projects yet</option>}
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.project_code} - {project.name}
-              </option>
-            ))}
-          </select>
+          {selectedProjectData ? (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-800">
+              <p className="font-semibold">{selectedProjectData.project_code || selectedProjectData.name}</p>
+              <p className="text-xs">{selectedProjectData.name}</p>
+              {selectedProjectData.address ? <p className="mt-1 text-xs text-emerald-700">{selectedProjectData.address}</p> : null}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-800">
+              No project assigned for today. Please contact your project manager.
+            </div>
+          )}
         </div>
 
         <div className="rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 p-4 text-white shadow-soft">
@@ -781,7 +993,7 @@ export default function AttendancePanel({ token, profile }) {
             <button
               type="button"
               onClick={() => beginAttendanceFlow("in")}
-              disabled={scanBusy}
+              disabled={scanBusy || hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule || isDayOffOrLeave}
               className="rounded-xl bg-white/95 px-4 py-3 text-sm font-bold text-emerald-700 hover:bg-white disabled:opacity-60"
             >
               Check-in
@@ -789,19 +1001,35 @@ export default function AttendancePanel({ token, profile }) {
             <button
               type="button"
               onClick={() => beginAttendanceFlow("out")}
-              disabled={scanBusy}
+              disabled={scanBusy || !hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule || isDayOffOrLeave}
               className="rounded-xl bg-slate-900/80 px-4 py-3 text-sm font-bold text-white hover:bg-slate-900 disabled:opacity-60"
             >
               Check-out
             </button>
           </div>
+          {!isFaceApproved && (
+            <p className="mt-2 text-xs text-amber-100">
+              You must complete face enrollment and get HR approval before attendance check-in.
+            </p>
+          )}
+          {!hasTodaySchedule && (
+            <p className="mt-2 text-xs text-amber-100">You are not assigned to a project today. Please contact your project manager.</p>
+          )}
+          {isDayOffOrLeave && (
+            <p className="mt-2 text-xs text-amber-100">Today is your day off/leave. Attendance is locked.</p>
+          )}
+          {gpsDistanceMeters != null && !isWithinRadius && (
+            <p className="mt-2 text-xs text-red-200">
+              ⚠️ You are outside the GPS radius. Please move within {effectiveRadiusMeters}m of the project location to check in/out.
+            </p>
+          )}
           <p className="mt-3 text-xs text-emerald-100">Press Check-in/Check-out to open scanning modal instantly.</p>
         </div>
       </div>
 
       {scanVisible && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-steel/15 bg-white p-4 shadow-2xl">
+          <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl border border-steel/15 bg-white p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="font-semibold text-steel">Face Scan & GPS Integration</h3>
               <div className="flex items-center gap-2">
@@ -815,65 +1043,151 @@ export default function AttendancePanel({ token, profile }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    scanRunIdRef.current += 1;
-                    activeScanTypeRef.current = null;
-                    stopCamera();
-                    setScanVisible(false);
-                    setScanBusy(false);
-                  }}
+                  onClick={closeScanModal}
                   className="rounded-lg bg-steel/10 px-3 py-1.5 text-xs font-semibold text-graphite hover:bg-steel/20"
                 >
-                  Close
+                  X
                 </button>
               </div>
             </div>
             {statusBanner}
 
-            <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">
-              <video
-                ref={videoRef}
-                onPlay={handleVideoPlay}
-                autoPlay
-                playsInline
-                className={`h-full w-full -scale-x-100 object-cover ${streaming ? "" : "hidden"}`}
-              />
-              {!streaming && <div className="flex h-full items-center justify-center text-slate-400">Starting camera...</div>}
-              <canvas
-                ref={overlayCanvasRef}
-                className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 ${streaming ? "" : "hidden"}`}
-              />
-              <canvas ref={canvasRef} className="hidden" />
-            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">
+                  <video
+                    ref={videoRef}
+                    onPlay={handleVideoPlay}
+                    autoPlay
+                    playsInline
+                    className={`h-full w-full -scale-x-100 object-cover ${streaming ? "" : "hidden"}`}
+                  />
+                  {!streaming && (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-300">
+                      <span className="text-sm">Starting camera...</span>
+                      {scanCountdown > 0 && <span className="text-4xl font-bold text-emerald-400">{scanCountdown}</span>}
+                    </div>
+                  )}
+                  {streaming && (
+                    <>
+                      <div className="pointer-events-none absolute left-0 right-0 top-1/2 h-0.5 bg-emerald-400/80 animate-pulse" />
+                      <div className="pointer-events-none absolute inset-x-5 inset-y-5 rounded-xl border border-emerald-400/60" />
+                    </>
+                  )}
+                  <canvas
+                    ref={overlayCanvasRef}
+                    className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 ${streaming ? "" : "hidden"}`}
+                  />
+                  <canvas ref={canvasRef} className="hidden" />
+                </div>
 
-            {facePreview && (
-              <div className="mt-3 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-2">
-                <img src={facePreview} alt="Captured face" className="h-14 w-20 rounded object-cover" />
-                <div className="text-xs text-emerald-700">Latest AI face frame used for verification.</div>
+                {facePreview && (
+                  <div className="mt-3 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-2">
+                    <img src={facePreview} alt="Captured face" className="h-14 w-20 rounded object-cover" />
+                    <div className="text-xs text-emerald-700">Latest AI face frame used for verification.</div>
+                  </div>
+                )}
               </div>
-            )}
 
-            <div className="mt-3 rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+              <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
               <h3 className="mb-3 font-semibold text-steel">GPS Integration</h3>
               <p className="mb-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">
-                GPS is captured automatically during attendance submit.
+                GPS is prefetched in background and frozen when you tap Check-in/Check-out.
               </p>
 
-              <div className="mt-3 rounded-xl border border-steel/15 bg-slate-50 p-3 text-sm">
-                <p className="font-semibold text-steel">Realtime</p>
-                <p className="text-graphite/70">Current Time: <strong>{new Date(nowTs).toLocaleString("en-GB")}</strong></p>
-                <p className="text-graphite/70">Project: <strong>{selectedProjectData?.name || "-"}</strong></p>
+                {selectedProjectData && selectedProjectData.latitude && selectedProjectData.longitude ? (
+                  <div className="mt-3">
+                    <div className="h-44 rounded-xl overflow-hidden border border-steel/15">
+                    <MapContainer
+                      center={[selectedProjectData.latitude, selectedProjectData.longitude]}
+                      zoom={16}
+                      style={{ height: "100%", width: "100%" }}
+                    >
+                      <TileLayer
+                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                      />
+                      <Circle
+                        center={[selectedProjectData.latitude, selectedProjectData.longitude]}
+                        radius={effectiveRadiusMeters}
+                        pathOptions={{
+                          color: isWithinRadius ? "#22c55e" : "#ef4444",
+                          fillColor: isWithinRadius ? "#22c55e" : "#ef4444",
+                          fillOpacity: 0.2
+                        }}
+                      />
+                      <Marker
+                        position={[selectedProjectData.latitude, selectedProjectData.longitude]}
+                        icon={userIcon}
+                      >
+                        <Popup>Project Location</Popup>
+                      </Marker>
+                      {gpsCoords && (
+                        <Marker
+                          position={[gpsCoords.latitude, gpsCoords.longitude]}
+                          icon={L.divIcon({
+                            className: "custom-user-marker",
+                            html: `<div style="background-color: ${isWithinRadius ? "#22c55e" : "#ef4444"}; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
+                            iconSize: [16, 16],
+                            iconAnchor: [8, 8]
+                          })}
+                        >
+                          <Popup>Your Location</Popup>
+                        </Marker>
+                      )}
+                    </MapContainer>
+                  </div>
+                    <div className="mt-3 rounded-xl border border-steel/15 bg-slate-50 p-3 text-sm">
+                      <p className="font-semibold text-steel">Realtime</p>
+                      <p className="text-graphite/70">Current Time: <strong>{new Date(nowTs).toLocaleString("en-GB")}</strong></p>
+                      <p className="text-graphite/70">Project: <strong>{selectedProjectData?.name || "-"}</strong></p>
+                      {frozenAttendanceCoords && (
+                        <p className="text-graphite/70">
+                          Frozen GPS:{" "}
+                          <strong>
+                            {frozenAttendanceCoords.latitude.toFixed(6)}, {frozenAttendanceCoords.longitude.toFixed(6)}
+                          </strong>
+                        </p>
+                      )}
 
-                {gpsDistanceMeters != null && (
-                  <p className="mt-2">
-                    Distance: <strong>{gpsDistanceMeters.toFixed(1)} m</strong>{" "}
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${isWithinRadius ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
-                      {isWithinRadius ? "Within Radius" : "Out of Radius"}
-                    </span>
-                  </p>
+                      {gpsDistanceMeters != null && (
+                        <p className="mt-2">
+                          Distance: <strong>{gpsDistanceMeters.toFixed(1)} m</strong>{" "}
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${isWithinRadius ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                            {isWithinRadius ? "Within Radius" : "Out of Radius"}
+                          </span>
+                        </p>
+                      )}
+                      {gpsDistanceMeters == null && <p className="mt-2 text-graphite/60">Distance will appear after GPS is captured.</p>}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-xl border border-steel/15 bg-slate-50 p-3 text-sm">
+                    <p className="font-semibold text-steel">Realtime</p>
+                    <p className="text-graphite/70">Current Time: <strong>{new Date(nowTs).toLocaleString("en-GB")}</strong></p>
+                    <p className="text-graphite/70">Project: <strong>{selectedProjectData?.name || "-"}</strong></p>
+                    {!selectedProjectData?.latitude && <p className="mt-2 text-amber-600">Project location not set. Please contact administrator.</p>}
+                  </div>
                 )}
-                {gpsDistanceMeters == null && <p className="mt-2 text-graphite/60">Distance will appear after first attendance scan.</p>}
               </div>
+            </div>
+
+            <div className="sticky bottom-0 mt-4 flex items-center justify-end gap-2 border-t border-steel/10 bg-white/95 pt-3 pb-1 backdrop-blur">
+              <button
+                type="button"
+                onClick={closeScanModal}
+                className="rounded-lg border border-steel/20 px-4 py-2 text-sm font-semibold text-graphite hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmAttendanceScan}
+                disabled={scanBusy || restartingCamera || !streaming || scanCountdown > 0}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {scanBusy ? "Processing..." : scanType === "out" ? "Confirm Check-out" : "Confirm Check-in"}
+              </button>
             </div>
           </div>
         </div>
@@ -915,9 +1229,15 @@ export default function AttendancePanel({ token, profile }) {
                   <td className="p-3">{item.check_in_time ? new Date(item.check_in_time).toLocaleString("en-GB") : "-"}</td>
                   <td className="p-3">{item.check_out_time ? new Date(item.check_out_time).toLocaleString("en-GB") : "-"}</td>
                   <td className="p-3">
-                    <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${item.check_out_time ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
-                      {item.check_out_time ? "Completed" : "Working"}
-                    </span>
+                    {String(item.attendance_status || "").toUpperCase() === "MISSING_OUT" ? (
+                      <span className="inline-block rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+                        Missing check-out
+                      </span>
+                    ) : (
+                      <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${item.check_out_time ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
+                        {item.check_out_time ? "Completed" : "Working"}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

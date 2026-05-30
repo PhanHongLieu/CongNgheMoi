@@ -309,6 +309,47 @@ async function syncProjectProgressFromTasks(projectId, mode = "points", db = poo
 
 async function ensureConstructionTables() {
   await pool.query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS progress_percent NUMERIC(6,2) NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(40) NOT NULL DEFAULT 'SYSTEM'");
+  await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL'");
+  await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'UNREAD'");
+
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS employee_work_schedules (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      shift_code VARCHAR(30) NOT NULL,
+      shift_name VARCHAR(120),
+      shift_start_time TIME NOT NULL,
+      shift_end_time TIME NOT NULL,
+      work_date DATE NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'SCHEDULED' CHECK (status IN ('SCHEDULED', 'COMPLETED', 'CANCELLED', 'DAY_OFF', 'LEAVE')),
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (user_id, project_id, shift_code, work_date)
+    )`
+  );
+
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_user_date ON employee_work_schedules (user_id, work_date)"
+  );
+  await pool.query(
+    `DELETE FROM employee_work_schedules a
+     USING employee_work_schedules b
+     WHERE a.id < b.id
+       AND a.user_id = b.user_id
+       AND a.project_id = b.project_id
+       AND a.shift_code = b.shift_code
+       AND a.work_date = b.work_date`
+  );
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_work_schedules_user_project_shift_date ON employee_work_schedules (user_id, project_id, shift_code, work_date)"
+  );
+  await pool.query("ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_status_check");
+  await pool.query(
+    "ALTER TABLE employee_work_schedules ADD CONSTRAINT employee_work_schedules_status_check CHECK (status IN ('SCHEDULED', 'COMPLETED', 'CANCELLED', 'DAY_OFF', 'LEAVE'))"
+  );
 
   await pool.query(
     `CREATE TABLE IF NOT EXISTS project_plan_boq_items (
@@ -794,6 +835,8 @@ app.get("/schedule", authenticate, authorize("EMPLOYEE"), async (req, res) => {
 });
 
 app.post("/projects", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  let inTransaction = false;
   try {
     const {
       projectCode,
@@ -844,7 +887,7 @@ app.post("/projects", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADM
   }
 });
 
-app.get("/projects/stage-templates", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.get("/projects/stage-templates", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER", "HR_MANAGER"), async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, stage_name, default_order, created_at, updated_at
@@ -857,7 +900,7 @@ app.get("/projects/stage-templates", authenticate, authorize("ADMIN", "MANAGER")
   }
 });
 
-app.get("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.get("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER", "HR_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const project = await pool.query("SELECT id FROM projects WHERE id = $1", [projectId]);
@@ -1244,7 +1287,7 @@ app.get("/projects/:id/assignments", authenticate, async (req, res) => {
       `SELECT psa.id, psa.user_id, psa.project_id, psa.stage_id, psa.assignment_role, psa.work_start, psa.work_end,
               ps.stage_name, ps.stage_order, ps.status AS stage_status, ps.progress_percent AS stage_progress_percent,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
-              u.employee_code, p.name AS project_name
+              u.employee_code, u.job_title, u.trade_code, u.skill_level, u.specialization, p.name AS project_name
        FROM project_stage_assignments psa
        JOIN users u ON psa.user_id = u.id
        JOIN projects p ON psa.project_id = p.id
@@ -1270,7 +1313,7 @@ app.get("/projects/:id/assignments", authenticate, async (req, res) => {
 
 app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
-    const { userId, projectId, stageId, assignmentRole, workStart, workEnd } = req.body;
+    const { userId, projectId, stageId, assignmentRole, workStart, workEnd, requiredTradeCode } = req.body;
     if (!userId || !projectId || !stageId) {
       return res.status(400).json({ message: "userId, projectId and stageId are required" });
     }
@@ -1303,14 +1346,15 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
     );
 
     await client.query(
-      `INSERT INTO project_assignments (user_id, project_id, assignment_role, work_start, work_end)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO project_assignments (user_id, project_id, assignment_role, work_start, work_end, required_trade_code)
+       VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (user_id, project_id)
        DO UPDATE SET
          assignment_role = EXCLUDED.assignment_role,
          work_start = EXCLUDED.work_start,
-         work_end = EXCLUDED.work_end`,
-      [Number(userId), Number(projectId), assignmentRole || null, workStart || null, workEnd || null]
+         work_end = EXCLUDED.work_end,
+         required_trade_code = EXCLUDED.required_trade_code`,
+      [Number(userId), Number(projectId), assignmentRole || null, workStart || null, workEnd || null, requiredTradeCode || null]
     );
 
     await client.query("COMMIT");
@@ -1801,24 +1845,330 @@ app.get("/projects/schedule", authenticate, async (req, res) => {
     const userId = Number(req.user.sub);
     const { rows } = await pool.query(
       `SELECT
-         pa.id,
-         pa.assignment_role,
-         pa.work_start,
-         pa.work_end,
+         ws.id,
+         ws.shift_code,
+         ws.shift_name,
+         ws.shift_start_time,
+         ws.shift_end_time,
+         ws.work_date,
+         ws.status AS schedule_status,
          p.id AS project_id,
          p.name AS project_name,
          p.project_code,
          p.status AS project_status,
-         p.address
-       FROM project_assignments pa
-       JOIN projects p ON p.id = pa.project_id
-       WHERE pa.user_id = $1
-       ORDER BY COALESCE(pa.work_start, p.start_date) DESC, pa.id DESC`,
+         p.address,
+         p.latitude,
+         p.longitude,
+         p.gps_radius_meters
+       FROM employee_work_schedules ws
+       JOIN projects p ON p.id = ws.project_id
+       WHERE ws.user_id = $1
+         AND ws.status <> 'CANCELLED'
+       ORDER BY ws.work_date DESC, ws.shift_start_time ASC, ws.id DESC`,
       [userId]
     );
+
+    if (rows.length === 0) {
+      const fallback = await pool.query(
+        `SELECT
+           pa.id,
+           pa.assignment_role,
+           pa.work_start,
+           pa.work_end,
+           p.id AS project_id,
+           p.name AS project_name,
+           p.project_code,
+           p.status AS project_status,
+           p.address,
+           p.latitude,
+           p.longitude,
+           p.gps_radius_meters
+         FROM project_assignments pa
+         JOIN projects p ON p.id = pa.project_id
+         WHERE pa.user_id = $1
+         ORDER BY COALESCE(pa.work_start, p.start_date) DESC, pa.id DESC`,
+        [userId]
+      );
+      return res.json(fallback.rows);
+    }
+
     return res.json(rows);
   } catch (error) {
     return res.status(500).json({ message: "Failed to load project schedule", error: error.message });
+  }
+});
+
+app.get("/projects/schedule/today", authenticate, async (req, res) => {
+  try {
+    const userId = Number(req.user.sub);
+    const { rows } = await pool.query(
+      `SELECT
+         ws.id,
+         ws.shift_code,
+         ws.shift_name,
+         ws.shift_start_time,
+         ws.shift_end_time,
+         ws.work_date,
+         ws.status AS schedule_status,
+         p.id AS project_id,
+         p.name AS project_name,
+         p.project_code,
+         p.status AS project_status,
+         p.address,
+         p.latitude,
+         p.longitude,
+         p.gps_radius_meters
+       FROM employee_work_schedules ws
+       JOIN projects p ON p.id = ws.project_id
+       WHERE ws.user_id = $1
+         AND ws.work_date = CURRENT_DATE
+         AND ws.status <> 'CANCELLED'
+       ORDER BY ws.shift_start_time ASC, ws.id ASC
+       LIMIT 1`,
+      [userId]
+    );
+    return res.json(rows[0] || null);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load today's project schedule", error: error.message });
+  }
+});
+
+app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const {
+      projectId,
+      userIds,
+      workDate,
+      shiftCode = "DAY",
+      shiftName = "Day Shift",
+      shiftStartTime = "08:00",
+      shiftEndTime = "17:00",
+      status = "SCHEDULED"
+    } = req.body || {};
+    const createdBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
+
+    const normalizedUserIds = Array.from(new Set((Array.isArray(userIds) ? userIds : []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+    if (!Number(projectId) || !workDate || normalizedUserIds.length === 0) {
+      return res.status(400).json({ message: "projectId, workDate and userIds are required" });
+    }
+
+    await client.query("BEGIN");
+    const inserted = [];
+    for (const userId of normalizedUserIds) {
+      const normalizedStatus = ["SCHEDULED", "COMPLETED", "CANCELLED", "DAY_OFF", "LEAVE"].includes(String(status || "").toUpperCase())
+        ? String(status).toUpperCase()
+        : "SCHEDULED";
+      const result = await client.query(
+        `INSERT INTO employee_work_schedules
+           (user_id, project_id, shift_code, shift_name, shift_start_time, shift_end_time, work_date, status, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (user_id, project_id, shift_code, work_date)
+         DO UPDATE SET
+           shift_name = EXCLUDED.shift_name,
+           shift_start_time = EXCLUDED.shift_start_time,
+           shift_end_time = EXCLUDED.shift_end_time,
+           status = EXCLUDED.status,
+           updated_at = NOW()
+         RETURNING *`,
+        [userId, Number(projectId), String(shiftCode || "DAY").toUpperCase(), shiftName, shiftStartTime, shiftEndTime, workDate, normalizedStatus, createdBy]
+      );
+      inserted.push(result.rows[0]);
+      await client.query(
+        `INSERT INTO notifications (user_id, title, message, notification_type, priority, status, created_at)
+         VALUES ($1, $2, $3, 'SYSTEM', 'NORMAL', 'UNREAD', NOW())`,
+        [
+          userId,
+          "Work schedule updated",
+          `Your schedule for ${workDate} has been updated to project ${Number(projectId)} (${normalizedStatus}).`
+        ]
+      );
+    }
+    await client.query("COMMIT");
+    return res.status(201).json({ insertedCount: inserted.length, rows: inserted });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("work-schedules/bulk failed", {
+      message: error.message,
+      detail: error.detail,
+      code: error.code
+    });
+    return res.status(500).json({ message: "Failed to bulk assign work schedules", error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/projects/work-schedules/import", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const createdBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (rows.length === 0) {
+      return res.status(400).json({ message: "rows is required" });
+    }
+    await client.query("BEGIN");
+    let insertedCount = 0;
+    for (const row of rows) {
+      const userId = Number(row.userId);
+      const projectId = Number(row.projectId);
+      const workDate = row.workDate;
+      if (!userId || !projectId || !workDate) {
+        continue;
+      }
+      const normalizedStatus = ["SCHEDULED", "COMPLETED", "CANCELLED", "DAY_OFF", "LEAVE"].includes(String(row.status || "").toUpperCase())
+        ? String(row.status).toUpperCase()
+        : "SCHEDULED";
+      await client.query(
+        `INSERT INTO employee_work_schedules
+           (user_id, project_id, shift_code, shift_name, shift_start_time, shift_end_time, work_date, status, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (user_id, project_id, shift_code, work_date)
+         DO UPDATE SET
+           shift_name = EXCLUDED.shift_name,
+           shift_start_time = EXCLUDED.shift_start_time,
+           shift_end_time = EXCLUDED.shift_end_time,
+           status = EXCLUDED.status,
+           updated_at = NOW()`,
+        [
+          userId,
+          projectId,
+          String(row.shiftCode || "DAY").toUpperCase(),
+          row.shiftName || "Day Shift",
+          row.shiftStartTime || "08:00",
+          row.shiftEndTime || "17:00",
+          workDate,
+          normalizedStatus,
+          createdBy
+        ]
+      );
+      await client.query(
+        `INSERT INTO notifications (user_id, title, message, notification_type, priority, status, created_at)
+         VALUES ($1, $2, $3, 'SYSTEM', 'NORMAL', 'UNREAD', NOW())`,
+        [
+          userId,
+          "Work schedule updated",
+          `Your schedule for ${workDate} has been updated to project ${projectId} (${normalizedStatus}).`
+        ]
+      );
+      insertedCount += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({ insertedCount });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ message: "Failed to import work schedules", error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/projects/work-schedules/export", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  try {
+    const projectId = Number(req.query.projectId || 0);
+    const from = String(req.query.from || "").trim();
+    const to = String(req.query.to || "").trim();
+    if (!projectId || !from || !to) {
+      return res.status(400).json({ message: "projectId, from, to are required" });
+    }
+    const { rows } = await pool.query(
+      `SELECT
+         ws.user_id AS "userId",
+         u.employee_code AS "employeeCode",
+         u.full_name AS "fullName",
+         ws.project_id AS "projectId",
+         p.project_code AS "projectCode",
+         ws.work_date AS "workDate",
+         ws.shift_code AS "shiftCode",
+         ws.shift_name AS "shiftName",
+         ws.shift_start_time AS "shiftStartTime",
+         ws.shift_end_time AS "shiftEndTime",
+         ws.status
+       FROM employee_work_schedules ws
+       JOIN users u ON u.id = ws.user_id
+       JOIN projects p ON p.id = ws.project_id
+       WHERE ws.project_id = $1
+         AND ws.work_date BETWEEN $2::date AND $3::date
+       ORDER BY ws.work_date ASC, ws.shift_start_time ASC, u.full_name ASC`,
+      [projectId, from, to]
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to export work schedules", error: error.message });
+  }
+});
+
+app.get("/projects/work-schedules/daily-ops", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  try {
+    const dateText = String(req.query.date || new Date().toISOString().slice(0, 10)).trim();
+    const projectId = Number(req.query.projectId || 0);
+    const where = ["ws.work_date = $1::date", "ws.status <> 'CANCELLED'"];
+    const params = [dateText];
+    if (projectId > 0) {
+      params.push(projectId);
+      where.push(`ws.project_id = $${params.length}`);
+    }
+
+    const summaryResult = await pool.query(
+      `SELECT
+         ws.project_id,
+         p.project_code,
+         p.name AS project_name,
+         COUNT(DISTINCT ws.user_id)::int AS assigned_count,
+         COUNT(DISTINCT CASE WHEN a.check_in_time IS NOT NULL THEN ws.user_id END)::int AS checked_in_count,
+         COUNT(DISTINCT CASE WHEN a.check_in_time IS NOT NULL AND a.check_in_time::time <= (COALESCE(ws.shift_start_time, '08:00'::time) + INTERVAL '15 minutes')::time THEN ws.user_id END)::int AS on_time_count,
+         COUNT(DISTINCT CASE WHEN a.check_in_time IS NOT NULL AND a.check_in_time::time > (COALESCE(ws.shift_start_time, '08:00'::time) + INTERVAL '15 minutes')::time THEN ws.user_id END)::int AS late_count,
+         COUNT(DISTINCT CASE WHEN a.check_in_time IS NULL THEN ws.user_id END)::int AS absent_count
+       FROM employee_work_schedules ws
+       JOIN projects p ON p.id = ws.project_id
+       LEFT JOIN attendance_logs a
+         ON a.user_id = ws.user_id
+        AND a.project_id = ws.project_id
+        AND DATE(a.check_in_time) = ws.work_date
+       WHERE ${where.join(" AND ")}
+       GROUP BY ws.project_id, p.project_code, p.name
+       ORDER BY p.project_code ASC`,
+      params
+    );
+
+    const rosterResult = await pool.query(
+      `SELECT
+         ws.project_id,
+         p.project_code,
+         p.name AS project_name,
+         ws.user_id,
+         u.employee_code,
+         u.full_name,
+         COALESCE(u.job_title, '') AS job_title,
+         COALESCE(u.trade_code, '') AS trade_code,
+         ws.shift_start_time,
+         ws.shift_end_time,
+         ws.status AS schedule_status,
+         a.check_in_time,
+         a.check_out_time,
+         a.attendance_status,
+         a.face_score,
+         a.check_in_latitude,
+         a.check_in_longitude
+       FROM employee_work_schedules ws
+       JOIN projects p ON p.id = ws.project_id
+       JOIN users u ON u.id = ws.user_id
+       LEFT JOIN attendance_logs a
+         ON a.user_id = ws.user_id
+        AND a.project_id = ws.project_id
+        AND DATE(a.check_in_time) = ws.work_date
+       WHERE ${where.join(" AND ")}
+       ORDER BY p.project_code ASC, u.employee_code ASC`,
+      params
+    );
+
+    return res.json({
+      date: dateText,
+      projectSummary: summaryResult.rows,
+      roster: rosterResult.rows
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load daily operations data", error: error.message });
   }
 });
 

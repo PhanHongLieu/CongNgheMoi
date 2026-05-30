@@ -1,8 +1,42 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { DndContext, useDraggable, useDroppable } from "@dnd-kit/core";
 import SidebarMenu from "../SidebarMenu";
+import GPSLocationPage from "./ManagerGPSLocation";
+import DiaryPage from "./ManagerDiary";
+import MaterialsPage from "./ManagerMaterials";
 import { apiRequest } from "../../lib/api";
 import { exportRowsToCsv, parseCsvText } from "../../lib/csv";
 import { getTranslation } from "../../i18n";
+
+function DraggableEmployeeRow({ employee }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `employee-${employee.id}`,
+    data: { employeeId: Number(employee.id) }
+  });
+  const style = transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : undefined;
+  return (
+    <label
+      ref={setNodeRef}
+      style={style}
+      className={`flex cursor-grab items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-steel/5 active:cursor-grabbing ${
+        isDragging ? "opacity-60" : ""
+      }`}
+    >
+      <span className="text-slate-400" {...listeners} {...attributes}>⠿</span>
+      <span>{employee.employee_code} - {employee.full_name} [{employee.trade_code || "-"}]</span>
+    </label>
+  );
+}
+
+function TradeDropZone({ trade, children, isActive }) {
+  const { isOver, setNodeRef } = useDroppable({ id: `drop-${trade}` });
+  const active = isActive || isOver;
+  return (
+    <div ref={setNodeRef} className={`mb-2 rounded-lg border p-2 ${active ? "border-cyan-400 bg-cyan-50" : "border-steel/10 bg-steel/5"}`}>
+      {children}
+    </div>
+  );
+}
 
 function TrendLineChart({ points, stroke = "#0ea5e9", fill = "rgba(14, 165, 233, 0.12)" }) {
   if (!Array.isArray(points) || points.length === 0) {
@@ -359,15 +393,18 @@ function SmartGanttBoard({ rows }) {
   );
 }
 
-function ProjectsPage({
+export function ProjectsPage({
   token,
   projects,
   employees,
   reloadProjects,
   showProjectManagement = true,
-  showAssignmentManagement = true
+  showAssignmentManagement = true,
+  workforceRole = "HR"
 }) {
-  const PAGE_SIZE = 5;
+  const projectList = Array.isArray(projects) ? projects : [];
+  const employeeList = Array.isArray(employees) ? employees : [];
+  const PAGE_SIZE = 12;
   const [status, setStatus] = useState("Ready");
   const [projectForm, setProjectForm] = useState({
     id: "",
@@ -396,7 +433,33 @@ function ProjectsPage({
   const [isProjectEditing, setIsProjectEditing] = useState(false);
   const [viewProject, setViewProject] = useState(null);
   const [assignmentSearch, setAssignmentSearch] = useState("");
+  const [assignmentTradeFilter, setAssignmentTradeFilter] = useState("ALL");
   const [assignmentPage, setAssignmentPage] = useState(1);
+  const [bulkWorkDate, setBulkWorkDate] = useState("");
+  const [bulkShiftCode, setBulkShiftCode] = useState("DAY");
+  const [bulkShiftName, setBulkShiftName] = useState("Day Shift");
+  const [bulkShiftStartTime, setBulkShiftStartTime] = useState("08:00");
+  const [bulkShiftEndTime, setBulkShiftEndTime] = useState("17:00");
+  const [bulkStatus, setBulkStatus] = useState("SCHEDULED");
+  const [bulkUserIds, setBulkUserIds] = useState([]);
+  const [exportFromDate, setExportFromDate] = useState("");
+  const [exportToDate, setExportToDate] = useState("");
+  const [workforceRangeStart, setWorkforceRangeStart] = useState("");
+  const [workforceRangeEnd, setWorkforceRangeEnd] = useState("");
+  const [workforceTradeCodeFilter, setWorkforceTradeCodeFilter] = useState("ALL");
+  const [leftSelectedUserIds, setLeftSelectedUserIds] = useState([]);
+  const [rightSelectedUserIds, setRightSelectedUserIds] = useState([]);
+  const [weeklyScheduleRows, setWeeklyScheduleRows] = useState([]);
+  const [draftAssignedUserIds, setDraftAssignedUserIds] = useState([]);
+  const [excelMenuOpen, setExcelMenuOpen] = useState(false);
+  const [quotaModalOpen, setQuotaModalOpen] = useState(false);
+  const [quotaDraft, setQuotaDraft] = useState({});
+  const [tradeQuota, setTradeQuota] = useState({});
+  const isPMMode = String(workforceRole || "").toUpperCase() === "PM";
+  const isHRMode = String(workforceRole || "").toUpperCase() === "HR";
+  const [activeDragEmployeeId, setActiveDragEmployeeId] = useState(null);
+  const [activeDropTrade, setActiveDropTrade] = useState("");
+  const [crossTradeAssignments, setCrossTradeAssignments] = useState({});
   const [selectedStageProjectId, setSelectedStageProjectId] = useState("");
   const [projectStages, setProjectStages] = useState([]);
   const [stageSearch, setStageSearch] = useState("");
@@ -418,28 +481,57 @@ function ProjectsPage({
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
     if (!keyword) {
-      return projects;
+      return projectList;
     }
-    return projects.filter((p) => {
+    return projectList.filter((p) => {
       const text = `${p.project_code || ""} ${p.name || ""} ${p.status || ""} ${p.address || ""}`.toLowerCase();
       return text.includes(keyword);
     });
-  }, [projects, projectSearch]);
+  }, [projectList, projectSearch]);
 
   const projectTotalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE));
   const safeProjectPage = Math.min(projectPage, projectTotalPages);
   const pagedProjects = filteredProjects.slice((safeProjectPage - 1) * PAGE_SIZE, safeProjectPage * PAGE_SIZE);
 
+  const assignmentListRows = useMemo(() => {
+    if (Array.isArray(weeklyScheduleRows) && weeklyScheduleRows.length > 0) {
+      return weeklyScheduleRows.map((row, index) => {
+        const employee = employeeList.find((item) => Number(item.id) === Number(row.userId));
+        return {
+          id: `ws-${row.userId}-${row.workDate}-${index}`,
+          is_schedule_row: true,
+          user_id: Number(row.userId),
+          project_id: Number(row.projectId || assignmentForm.projectId || 0),
+          work_date: row.workDate || "",
+          shift_code: row.shiftCode || "DAY",
+          shift_name: row.shiftName || "Administrative Shift",
+          shift_start_time: row.shiftStartTime || "08:00",
+          shift_end_time: row.shiftEndTime || "17:00",
+          employee_code: employee?.employee_code || `#${row.userId}`,
+          full_name: employee?.full_name || "Unknown",
+          trade_code: String(employee?.trade_code || "").toUpperCase(),
+          assignment_role: row.shiftCode || "DAY",
+          stage_name: row.workDate || "-",
+          schedule_status: row.status || "SCHEDULED"
+        };
+      });
+    }
+    return assignments;
+  }, [weeklyScheduleRows, employeeList, assignments, assignmentForm.projectId]);
+
   const filteredAssignments = useMemo(() => {
     const keyword = assignmentSearch.trim().toLowerCase();
-    if (!keyword) {
-      return assignments;
-    }
-    return assignments.filter((a) => {
-      const text = `${a.employee_code || ""} ${a.full_name || ""} ${a.assignment_role || ""} ${a.stage_name || ""}`.toLowerCase();
+    return assignmentListRows.filter((a) => {
+      if (assignmentTradeFilter !== "ALL" && String(a.trade_code || "").toUpperCase() !== assignmentTradeFilter) {
+        return false;
+      }
+      if (!keyword) {
+        return true;
+      }
+      const text = `${a.employee_code || ""} ${a.full_name || ""} ${a.assignment_role || ""} ${a.stage_name || ""} ${a.trade_code || ""} ${a.job_title || ""} ${a.schedule_status || ""}`.toLowerCase();
       return text.includes(keyword);
     });
-  }, [assignments, assignmentSearch]);
+  }, [assignmentListRows, assignmentSearch, assignmentTradeFilter]);
 
   const assignmentTotalPages = Math.max(1, Math.ceil(filteredAssignments.length / PAGE_SIZE));
   const safeAssignmentPage = Math.min(assignmentPage, assignmentTotalPages);
@@ -481,13 +573,27 @@ function ProjectsPage({
     if (!showAssignmentManagement) {
       return;
     }
-    if (!assignmentForm.projectId && projects[0]?.id) {
-      setAssignmentForm((prev) => ({ ...prev, projectId: String(projects[0].id) }));
+    if (!assignmentForm.projectId && projectList[0]?.id) {
+      setAssignmentForm((prev) => ({ ...prev, projectId: String(projectList[0].id) }));
     }
-    if (!assignmentForm.userId && employees[0]?.id) {
-      setAssignmentForm((prev) => ({ ...prev, userId: String(employees[0].id) }));
+    if (!assignmentForm.userId && employeeList[0]?.id) {
+      setAssignmentForm((prev) => ({ ...prev, userId: String(employeeList[0].id) }));
     }
-  }, [projects, employees, assignmentForm.projectId, assignmentForm.userId, showAssignmentManagement]);
+  }, [projectList, employeeList, assignmentForm.projectId, assignmentForm.userId, showAssignmentManagement]);
+
+  useEffect(() => {
+    if (!showAssignmentManagement) {
+      return;
+    }
+    if (workforceRangeStart && workforceRangeEnd) {
+      return;
+    }
+    const start = new Date();
+    const end = new Date();
+    end.setDate(end.getDate() + 6);
+    setWorkforceRangeStart(toDateText(start));
+    setWorkforceRangeEnd(toDateText(end));
+  }, [showAssignmentManagement, workforceRangeStart, workforceRangeEnd]);
 
   useEffect(() => {
     if (!showAssignmentManagement) {
@@ -516,16 +622,100 @@ function ProjectsPage({
 
   useEffect(() => {
     setAssignmentPage(1);
-  }, [assignmentSearch, assignmentForm.projectId]);
+  }, [assignmentSearch, assignmentForm.projectId, assignmentTradeFilter]);
+
+  const tradeFilterOptions = useMemo(() => {
+    const fromEmployees = employeeList.map((u) => String(u.trade_code || "").toUpperCase()).filter(Boolean);
+    const fromAssignments = assignments.map((u) => String(u.trade_code || "").toUpperCase()).filter(Boolean);
+    return ["ALL", ...Array.from(new Set([...fromEmployees, ...fromAssignments]))];
+  }, [employeeList, assignments]);
+
+  const workforceTradeOptions = useMemo(() => ["ALL", ...Array.from(new Set(employeeList.map((item) => String(item.trade_code || "").toUpperCase()).filter(Boolean)))], [employeeList]);
+
+  const assignedUserIdSet = useMemo(
+    () => new Set((weeklyScheduleRows || []).map((item) => Number(item.userId)).filter((id) => Number.isFinite(id))),
+    [weeklyScheduleRows]
+  );
+  const draftAssignedUserIdSet = useMemo(
+    () => new Set((draftAssignedUserIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id))),
+    [draftAssignedUserIds]
+  );
+
+  const availableEmployees = useMemo(() => {
+    return employeeList.filter((employee) => {
+      const employeeTrade = String(employee.trade_code || "").toUpperCase();
+      if (workforceTradeCodeFilter !== "ALL" && employeeTrade !== workforceTradeCodeFilter) {
+        return false;
+      }
+      return !draftAssignedUserIdSet.has(Number(employee.id));
+    });
+  }, [employeeList, workforceTradeCodeFilter, draftAssignedUserIdSet]);
+
+  const assignedEmployees = useMemo(() => {
+    return employeeList.filter((employee) => draftAssignedUserIdSet.has(Number(employee.id)));
+  }, [employeeList, draftAssignedUserIdSet]);
+
+  const assignedByTrade = useMemo(() => {
+    const map = {};
+    for (const employee of assignedEmployees) {
+      const trade = String(crossTradeAssignments[String(employee.id)] || employee.trade_code || "UNASSIGNED").toUpperCase();
+      if (!map[trade]) {
+        map[trade] = [];
+      }
+      map[trade].push(employee);
+    }
+    return map;
+  }, [assignedEmployees, crossTradeAssignments]);
+
+  const assignmentTradeGroups = useMemo(() => {
+    const groups = new Set();
+    workforceTradeOptions
+      .filter((trade) => trade !== "ALL")
+      .forEach((trade) => groups.add(String(trade).toUpperCase()));
+    Object.keys(tradeQuota || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
+    Object.keys(assignedByTrade || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
+    return Array.from(groups);
+  }, [workforceTradeOptions, tradeQuota, assignedByTrade]);
+
+  const assignedTradeCount = useMemo(() => {
+    const map = {};
+    for (const [trade, items] of Object.entries(assignedByTrade)) {
+      map[trade] = Array.isArray(items) ? items.length : 0;
+    }
+    return map;
+  }, [assignedByTrade]);
+
+  const filteredTrade = workforceTradeCodeFilter === "ALL" ? null : workforceTradeCodeFilter;
+  const filteredRequired = filteredTrade ? Number(tradeQuota[filteredTrade] || 0) : 0;
+  const filteredAssigned = filteredTrade ? Number(assignedTradeCount[filteredTrade] || 0) : 0;
+  const filteredMissing = filteredTrade ? Math.max(filteredRequired - filteredAssigned, 0) : 0;
+  const quotaStorageKey = useMemo(
+    () => `workforce_quota_v1:${assignmentForm.projectId || "none"}:${workforceRangeStart || "none"}:${workforceRangeEnd || "none"}`,
+    [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd]
+  );
+
+  useEffect(() => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
+      setTradeQuota({});
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(quotaStorageKey);
+      const parsed = raw ? JSON.parse(raw) : {};
+      setTradeQuota(parsed && typeof parsed === "object" ? parsed : {});
+    } catch {
+      setTradeQuota({});
+    }
+  }, [quotaStorageKey, assignmentForm.projectId, workforceRangeStart, workforceRangeEnd]);
 
   useEffect(() => {
     if (!showProjectManagement) {
       return;
     }
-    if (!selectedStageProjectId && projects[0]?.id) {
-      setSelectedStageProjectId(String(projects[0].id));
+    if (!selectedStageProjectId && projectList[0]?.id) {
+      setSelectedStageProjectId(String(projectList[0].id));
     }
-  }, [projects, selectedStageProjectId, showProjectManagement]);
+  }, [projectList, selectedStageProjectId, showProjectManagement]);
 
   const loadProjectStages = useCallback(
     async (projectId) => {
@@ -719,6 +909,370 @@ function ProjectsPage({
     }
   };
 
+  const toggleBulkUser = (userId) => {
+    setBulkUserIds((prev) => (prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]));
+  };
+
+  const runBulkScheduleAssignment = async () => {
+    try {
+      if (!assignmentForm.projectId || !bulkWorkDate || bulkUserIds.length === 0) {
+        setStatus("Select project, work date and at least one employee");
+        return;
+      }
+      await apiRequest("/projects/work-schedules/bulk", token, {
+        method: "POST",
+        body: {
+          projectId: Number(assignmentForm.projectId),
+          userIds: bulkUserIds,
+          workDate: bulkWorkDate,
+          shiftCode: bulkShiftCode,
+          shiftName: bulkShiftName,
+          shiftStartTime: bulkShiftStartTime,
+          shiftEndTime: bulkShiftEndTime,
+          status: bulkStatus
+        }
+      });
+      setStatus("Bulk schedule assignment saved successfully");
+    } catch (error) {
+      setStatus(`Bulk schedule assignment failed: ${error.message}`);
+    }
+  };
+
+  const importScheduleCsv = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      const parsed = parseCsvText(text);
+      const rows = parsed.map((item) => ({
+        userId: Number(item.userId || item.user_id || 0),
+        projectId: Number(item.projectId || item.project_id || assignmentForm.projectId || 0),
+        workDate: item.workDate || item.work_date || "",
+        shiftCode: item.shiftCode || item.shift_code || "DAY",
+        shiftName: item.shiftName || item.shift_name || "Day Shift",
+        shiftStartTime: item.shiftStartTime || item.shift_start_time || "08:00",
+        shiftEndTime: item.shiftEndTime || item.shift_end_time || "17:00",
+        status: item.status || "SCHEDULED"
+      }));
+      await apiRequest("/projects/work-schedules/import", token, {
+        method: "POST",
+        body: { rows }
+      });
+      setStatus("Schedule import completed");
+    } catch (error) {
+      setStatus(`Schedule import failed: ${error.message}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const exportScheduleCsv = async () => {
+    try {
+      const from = workforceRangeStart || exportFromDate;
+      const to = workforceRangeEnd || exportToDate;
+      if (!assignmentForm.projectId || !from || !to) {
+        setStatus("Select project and target date range");
+        return;
+      }
+      const rows = await apiRequest(
+        `/projects/work-schedules/export?projectId=${encodeURIComponent(assignmentForm.projectId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        token
+      );
+      exportRowsToCsv(
+        "work-schedules.csv",
+        [
+          { key: "userId", label: "userId" },
+          { key: "employeeCode", label: "employeeCode" },
+          { key: "fullName", label: "fullName" },
+          { key: "projectId", label: "projectId" },
+          { key: "projectCode", label: "projectCode" },
+          { key: "workDate", label: "workDate" },
+          { key: "shiftCode", label: "shiftCode" },
+          { key: "shiftName", label: "shiftName" },
+          { key: "shiftStartTime", label: "shiftStartTime" },
+          { key: "shiftEndTime", label: "shiftEndTime" },
+          { key: "status", label: "status" }
+        ],
+        Array.isArray(rows) ? rows : []
+      );
+      setStatus("Schedule export completed");
+    } catch (error) {
+      setStatus(`Schedule export failed: ${error.message}`);
+    }
+  };
+
+  const removeSingleAssignedUser = async (userId) => {
+    setDraftAssignedUserIds((prev) => prev.filter((id) => Number(id) !== Number(userId)));
+    setCrossTradeAssignments((prev) => {
+      const next = { ...prev };
+      delete next[String(userId)];
+      return next;
+    });
+  };
+
+  const openQuotaModal = () => {
+    const draft = {};
+    for (const trade of workforceTradeOptions) {
+      if (trade === "ALL") continue;
+      draft[trade] = String(tradeQuota[trade] ?? "");
+    }
+    setQuotaDraft(draft);
+    setQuotaModalOpen(true);
+  };
+
+  const saveQuotaConfig = () => {
+    const next = {};
+    for (const [trade, value] of Object.entries(quotaDraft || {})) {
+      const num = Number(value);
+      next[trade] = Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
+    }
+    setTradeQuota(next);
+    try {
+      localStorage.setItem(quotaStorageKey, JSON.stringify(next));
+    } catch {
+      // ignore local storage write errors
+    }
+    setQuotaModalOpen(false);
+    setStatus("Quota configuration updated.");
+  };
+
+  const toDateText = (value) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toISOString().slice(0, 10);
+  };
+
+  const eachDateBetween = (fromText, toText) => {
+    const from = new Date(fromText);
+    const to = new Date(toText);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return [];
+    const rows = [];
+    const cursor = new Date(from);
+    while (cursor <= to) {
+      rows.push(cursor.toISOString().slice(0, 10));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return rows;
+  };
+
+  const loadWeeklyScheduleRows = useCallback(async () => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
+      setWeeklyScheduleRows([]);
+      return;
+    }
+    try {
+      const rows = await apiRequest(
+        `/projects/work-schedules/export?projectId=${encodeURIComponent(assignmentForm.projectId)}&from=${encodeURIComponent(workforceRangeStart)}&to=${encodeURIComponent(workforceRangeEnd)}`,
+        token
+      );
+      const normalizedRows = (Array.isArray(rows) ? rows : []).filter(
+        (item) => String(item?.status || "").toUpperCase() !== "CANCELLED"
+      );
+      setWeeklyScheduleRows(normalizedRows);
+      const ids = Array.from(new Set(normalizedRows.map((item) => Number(item.userId)).filter((id) => Number.isFinite(id))));
+      setDraftAssignedUserIds(ids);
+      setCrossTradeAssignments({});
+    } catch (error) {
+      setStatus(`Unable to load weekly schedule: ${error.message}`);
+    }
+  }, [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd, token]);
+
+  const assignTransferUsers = async () => {
+    if (leftSelectedUserIds.length === 0) {
+      setStatus("Please select available employees.");
+      return;
+    }
+    setDraftAssignedUserIds((prev) => Array.from(new Set([...prev, ...leftSelectedUserIds.map(Number)])));
+    setLeftSelectedUserIds([]);
+  };
+
+  const unassignTransferUsers = async () => {
+    if (rightSelectedUserIds.length === 0) {
+      setStatus("Please select assigned employees to remove.");
+      return;
+    }
+    setDraftAssignedUserIds((prev) => prev.filter((id) => !rightSelectedUserIds.includes(Number(id))));
+    setCrossTradeAssignments((prev) => {
+      const next = { ...prev };
+      rightSelectedUserIds.forEach((id) => delete next[String(id)]);
+      return next;
+    });
+    setRightSelectedUserIds([]);
+  };
+
+  const handleDragStart = (event) => {
+    const employeeId = event?.active?.data?.current?.employeeId;
+    setActiveDragEmployeeId(Number(employeeId || 0) || null);
+  };
+
+  const handleDragOver = (event) => {
+    const overId = String(event?.over?.id || "");
+    if (overId.startsWith("drop-")) {
+      setActiveDropTrade(overId.replace("drop-", "").toUpperCase());
+    } else {
+      setActiveDropTrade("");
+    }
+  };
+
+  const handleDragEnd = (event) => {
+    const overId = String(event?.over?.id || "");
+    const employeeId = Number(event?.active?.data?.current?.employeeId || 0);
+    setActiveDragEmployeeId(null);
+    setActiveDropTrade("");
+    if (!employeeId || !overId.startsWith("drop-")) {
+      return;
+    }
+    const targetTrade = overId.replace("drop-", "").toUpperCase();
+    const employee = employeeList.find((item) => Number(item.id) === employeeId);
+    if (!employee) {
+      return;
+    }
+    setDraftAssignedUserIds((prev) => Array.from(new Set([...prev, employeeId])));
+    const sourceTrade = String(employee.trade_code || "").toUpperCase();
+    if (sourceTrade && sourceTrade !== targetTrade) {
+      setCrossTradeAssignments((prev) => ({ ...prev, [String(employeeId)]: targetTrade }));
+    } else {
+      setCrossTradeAssignments((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, String(employeeId))) return prev;
+        const next = { ...prev };
+        delete next[String(employeeId)];
+        return next;
+      });
+    }
+  };
+
+  const saveDraftAssignment = async () => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
+      setStatus("Please select project and date range.");
+      return;
+    }
+    const crossCount = Object.keys(crossTradeAssignments || {}).length;
+    if (crossCount > 0) {
+      const ok = window.confirm(`There are ${crossCount} cross-trade assignments. Continue saving?`);
+      if (!ok) {
+        return;
+      }
+    }
+    try {
+      const toAdd = Array.from(draftAssignedUserIdSet).filter((id) => !assignedUserIdSet.has(id));
+      const toRemove = Array.from(assignedUserIdSet).filter((id) => !draftAssignedUserIdSet.has(id));
+      const workDates = eachDateBetween(workforceRangeStart, workforceRangeEnd);
+      if (workDates.length === 0) {
+        setStatus("Invalid date range for assignment.");
+        return;
+      }
+      for (const workDate of workDates) {
+        if (toAdd.length > 0) {
+          await apiRequest("/projects/work-schedules/bulk", token, {
+            method: "POST",
+            body: {
+              projectId: Number(assignmentForm.projectId),
+              userIds: toAdd,
+              workDate,
+              shiftCode: "DAY",
+              shiftName: "Administrative Shift",
+              status: "SCHEDULED"
+            }
+          });
+        }
+        if (toRemove.length > 0) {
+          await apiRequest("/projects/work-schedules/bulk", token, {
+            method: "POST",
+            body: {
+              projectId: Number(assignmentForm.projectId),
+              userIds: toRemove,
+              workDate,
+              shiftCode: "DAY",
+              shiftName: "Administrative Shift",
+              status: "CANCELLED"
+            }
+          });
+        }
+      }
+      setStatus("Assignment saved successfully");
+      await loadWeeklyScheduleRows();
+    } catch (error) {
+      setStatus(`Save assignment failed: ${error.message}`);
+    }
+  };
+
+  const autoAllocateTransferUsers = () => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
+      setStatus("Please select project and date range first.");
+      return;
+    }
+    const availableByTrade = {};
+    for (const employee of availableEmployees) {
+      const trade = String(employee.trade_code || "UNASSIGNED").toUpperCase();
+      if (!availableByTrade[trade]) {
+        availableByTrade[trade] = [];
+      }
+      availableByTrade[trade].push(Number(employee.id));
+    }
+
+    const picked = [];
+    for (const [trade, requiredRaw] of Object.entries(tradeQuota || {})) {
+      const required = Number(requiredRaw || 0);
+      if (!Number.isFinite(required) || required <= 0) {
+        continue;
+      }
+      const normalizedTrade = String(trade).toUpperCase();
+      const assignedCount = Number(assignedTradeCount[normalizedTrade] || 0);
+      const missing = Math.max(required - assignedCount, 0);
+      if (missing <= 0) {
+        continue;
+      }
+      const candidates = availableByTrade[normalizedTrade] || [];
+      picked.push(...candidates.slice(0, missing));
+    }
+
+    if (picked.length === 0) {
+      setStatus("No available workforce to auto-allocate for current quota.");
+      return;
+    }
+    setDraftAssignedUserIds((prev) => Array.from(new Set([...prev.map(Number), ...picked])));
+    setStatus(`Auto-allocated ${picked.length} employee(s) based on quota gaps.`);
+  };
+
+  useEffect(() => {
+    if (!showAssignmentManagement) {
+      return;
+    }
+    loadWeeklyScheduleRows();
+  }, [showAssignmentManagement, loadWeeklyScheduleRows]);
+
+  const downloadScheduleTemplateCsv = () => {
+    exportRowsToCsv(
+      "work-schedule-template.csv",
+      [
+        { key: "userId", label: "userId" },
+        { key: "projectId", label: "projectId" },
+        { key: "workDate", label: "workDate" },
+        { key: "shiftCode", label: "shiftCode" },
+        { key: "shiftName", label: "shiftName" },
+        { key: "shiftStartTime", label: "shiftStartTime" },
+        { key: "shiftEndTime", label: "shiftEndTime" },
+        { key: "status", label: "status" }
+      ],
+      [
+        {
+          userId: "",
+          projectId: assignmentForm.projectId || "",
+          workDate: "2026-06-01",
+          shiftCode: "DAY",
+          shiftName: "Day Shift",
+          shiftStartTime: "08:00",
+          shiftEndTime: "17:00",
+          status: "SCHEDULED"
+        }
+      ]
+    );
+    setStatus("Schedule template downloaded");
+  };
+
   const removeAssignment = async (assignmentId) => {
     try {
       const target = assignments.find((a) => a.id === assignmentId);
@@ -731,6 +1285,67 @@ function ProjectsPage({
       loadAssignments(assignmentForm.projectId);
     } catch (error) {
       setStatus(`Assignment cancel failed: ${error.message}`);
+    }
+  };
+
+  const removeScheduleAssignment = async (row) => {
+    try {
+      const ok = window.confirm(`Delete schedule for ${row.employee_code} on ${row.work_date}?`);
+      if (!ok) {
+        return;
+      }
+      await apiRequest("/projects/work-schedules/bulk", token, {
+        method: "POST",
+        body: {
+          projectId: Number(row.project_id || assignmentForm.projectId),
+          userIds: [Number(row.user_id)],
+          workDate: row.work_date,
+          shiftCode: row.shift_code || "DAY",
+          shiftName: row.shift_name || "Administrative Shift",
+          shiftStartTime: row.shift_start_time || "08:00",
+          shiftEndTime: row.shift_end_time || "17:00",
+          status: "CANCELLED"
+        }
+      });
+      setStatus("Assignment cancelled");
+      await loadWeeklyScheduleRows();
+    } catch (error) {
+      setStatus(`Assignment cancel failed: ${error.message}`);
+    }
+  };
+
+  const editScheduleAssignment = async (row) => {
+    try {
+      const nextStatusRaw = window.prompt(
+        "Enter schedule status: SCHEDULED, COMPLETED, DAY_OFF, LEAVE, CANCELLED",
+        row.schedule_status || "SCHEDULED"
+      );
+      if (nextStatusRaw == null) {
+        return;
+      }
+      const nextStatus = String(nextStatusRaw || "").trim().toUpperCase();
+      const allowed = ["SCHEDULED", "COMPLETED", "DAY_OFF", "LEAVE", "CANCELLED"];
+      if (!allowed.includes(nextStatus)) {
+        setStatus("Invalid status for schedule update.");
+        return;
+      }
+      await apiRequest("/projects/work-schedules/bulk", token, {
+        method: "POST",
+        body: {
+          projectId: Number(row.project_id || assignmentForm.projectId),
+          userIds: [Number(row.user_id)],
+          workDate: row.work_date,
+          shiftCode: row.shift_code || "DAY",
+          shiftName: row.shift_name || "Administrative Shift",
+          shiftStartTime: row.shift_start_time || "08:00",
+          shiftEndTime: row.shift_end_time || "17:00",
+          status: nextStatus
+        }
+      });
+      setStatus("Assignment saved successfully");
+      await loadWeeklyScheduleRows();
+    } catch (error) {
+      setStatus(`Assignment save failed: ${error.message}`);
     }
   };
 
@@ -852,12 +1467,12 @@ function ProjectsPage({
 
   return (
     <section className="space-y-4">
-      {status && !["Ready", "Project list loaded", "Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully"].includes(status) && (
+      {status && !["Ready", "Project list loaded", "Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully", "Quota configuration updated."].includes(status) && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
-      {["Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully"].includes(status) && (
+      {["Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully", "Quota configuration updated."].includes(status) && (
         <div className="rounded-2xl bg-green-50 p-4 text-sm text-green-700 border border-green-200 flex items-center gap-2">
           <span className="text-lg">✓</span><span>{status}</span>
         </div>
@@ -865,62 +1480,155 @@ function ProjectsPage({
 
       <div className={`grid gap-4 ${showProjectManagement && showAssignmentManagement ? "xl:grid-cols-2" : ""}`}>
         {showAssignmentManagement && (
-          <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="rounded-lg bg-purple-100 p-2"><span className="text-xl">👥</span></div>
-            <h3 className="text-lg font-bold text-steel">Assignment Management</h3>
+          <section className="space-y-4 rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-lg font-bold text-steel">Workforce Assignment</h3>
+            <span className="rounded-full bg-steel/10 px-3 py-1 text-xs font-semibold text-steel">{filteredAssignments.length} active records</span>
           </div>
-          <div className="grid gap-3">
-            <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={assignmentForm.projectId} onChange={(e) => setAssignmentForm((p) => ({ ...p, projectId: e.target.value }))}>
-              {projects.map((p) => <option key={p.id} value={p.id}>{p.project_code} - {p.name}</option>)}
-            </select>
-            <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={assignmentForm.stageId} onChange={(e) => setAssignmentForm((p) => ({ ...p, stageId: e.target.value }))}>
-              {assignmentStages.map((stage) => (
-                <option key={stage.id} value={stage.id}>
-                  {`${stage.stage_order}. ${stage.stage_name} (${stage.status || "NOT_STARTED"})`}
-                </option>
-              ))}
-            </select>
-            <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" value={assignmentForm.userId} onChange={(e) => setAssignmentForm((p) => ({ ...p, userId: e.target.value }))}>
-              {employees.map((u) => <option key={u.id} value={u.id}>{u.employee_code} - {u.full_name}</option>)}
-            </select>
-            <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" placeholder="Assignment role" value={assignmentForm.assignmentRole} onChange={(e) => setAssignmentForm((p) => ({ ...p, assignmentRole: e.target.value }))} />
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs font-medium text-graphite/70 mb-1 block">Work start</label>
-                <input className="w-full rounded-lg border border-steel/20 px-3 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" type="datetime-local" value={assignmentForm.workStart} onChange={(e) => setAssignmentForm((p) => ({ ...p, workStart: e.target.value }))} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-graphite/70 mb-1 block">Work end</label>
-                <input className="w-full rounded-lg border border-steel/20 px-3 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10" type="datetime-local" value={assignmentForm.workEnd} onChange={(e) => setAssignmentForm((p) => ({ ...p, workEnd: e.target.value }))} />
-              </div>
+          <div className="rounded-xl border border-steel/15 bg-steel/5 p-4">
+            <h4 className="text-sm font-semibold text-steel">Assignment Target</h4>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <select className="w-full rounded-lg border border-steel/20 bg-white px-4 py-2.5 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/10 md:col-span-2" value={assignmentForm.projectId} onChange={(e) => setAssignmentForm((p) => ({ ...p, projectId: e.target.value }))}>
+                {projectList.map((p) => <option key={p.id} value={p.id}>{p.project_code} - {p.name}</option>)}
+              </select>
+              <input className="rounded-lg border border-steel/20 bg-white px-3 py-2 text-xs" type="date" value={workforceRangeStart} onChange={(e) => setWorkforceRangeStart(e.target.value)} />
+              <input className="rounded-lg border border-steel/20 bg-white px-3 py-2 text-xs" type="date" value={workforceRangeEnd} onChange={(e) => setWorkforceRangeEnd(e.target.value)} />
             </div>
-            {invalidAssignmentTime && (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Start time must be before end time.</p>
-            )}
-          </div>
-          <div className="mt-4 flex gap-2">
-            <button type="button" onClick={saveAssignment} className="rounded-lg bg-violet-600 hover:bg-violet-700 px-4 py-2.5 text-sm font-semibold text-white transition">💾 Save assignment</button>
-            <button type="button" onClick={() => loadAssignments(assignmentForm.projectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Reload</button>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-graphite/70">Shift is fixed by business flow: Administrative Shift (08:00 - 17:00).</p>
+              <button type="button" disabled={!isPMMode} onClick={openQuotaModal} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+                Set Quota
+              </button>
+            </div>
           </div>
 
-          <div className="mt-4 flex items-center justify-between gap-2">
+          {!isPMMode && (
+          <div className="rounded-xl border border-steel/15 bg-white p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-steel">Transfer Assignment</h4>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={autoAllocateTransferUsers} className="rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700">Auto Allocate</button>
+                <button type="button" onClick={saveDraftAssignment} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">Save Assignment</button>
+              </div>
+            </div>
+            {filteredTrade && (
+              <div className={`mt-2 rounded-lg border px-3 py-2 text-xs font-semibold ${
+                filteredMissing > 0 ? "border-amber-200 bg-amber-50 text-amber-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"
+              }`}>
+                📊 Requirement ({filteredTrade}): Need {filteredRequired} | Assigned {filteredAssigned} | Missing {filteredMissing}
+              </div>
+            )}
+            <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+            <div className="mt-3 grid gap-3 xl:grid-cols-2">
+              <div className="rounded-lg border border-steel/15 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-graphite/70">Available Workforce</p>
+                  <select className="rounded-lg border border-steel/20 px-2 py-1 text-xs" value={workforceTradeCodeFilter} onChange={(e) => setWorkforceTradeCodeFilter(e.target.value)}>
+                    {workforceTradeOptions.map((item) => (
+                      <option key={item} value={item}>{item === "ALL" ? "All trades" : item}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="h-64 overflow-y-auto space-y-1">
+                  {availableEmployees.map((employee) => (
+                    <DraggableEmployeeRow
+                      key={`left-${employee.id}`}
+                      employee={employee}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-lg border border-steel/15 p-3">
+                <p className="mb-2 text-xs font-semibold text-graphite/70">Assigned Workforce (Selected Range)</p>
+                <div className="h-64 overflow-y-auto space-y-1">
+                  {assignmentTradeGroups.map((trade) => {
+                    const items = assignedByTrade[trade] || [];
+                    const required = Number(tradeQuota[trade] || 0);
+                    const assigned = Array.isArray(items) ? items.length : 0;
+                    const missing = Math.max(required - assigned, 0);
+                    return (
+                      <TradeDropZone key={`group-${trade}`} trade={trade} isActive={activeDropTrade === trade}>
+                        <p className={`mb-1 rounded px-2 py-1 text-[11px] font-semibold ${
+                          missing > 0 ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+                        }`}>
+                          [{trade}] {assigned}/{required}
+                        </p>
+                        {items.map((employee) => (
+                          <div key={`right-${employee.id}`} className="flex items-center justify-between gap-2 rounded-md px-2 py-1 text-xs hover:bg-white">
+                            <label className="flex items-center gap-2">
+                            <span>{employee.employee_code} - {employee.full_name} [{employee.trade_code || "-"}]</span>
+                            {String(crossTradeAssignments[String(employee.id)] || "").toUpperCase() && String(crossTradeAssignments[String(employee.id)] || "").toUpperCase() !== String(employee.trade_code || "").toUpperCase() && (
+                              <span className="rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-700">⚠ Cross-trade</span>
+                            )}
+                            </label>
+                       <button type="button" onClick={() => removeSingleAssignedUser(employee.id)} className="px-1 py-1 text-sm text-slate-400 hover:text-red-600">🗑</button>
+                     </div>
+                   ))}
+                      </TradeDropZone>
+                    );
+                  })}
+                  {assignedEmployees.length === 0 && (
+                    <p className="text-xs text-graphite/60">No assigned workforce in selected range.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+            </DndContext>
+          </div>
+          )}
+
+          <div className="rounded-xl border border-steel/15 bg-white p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-steel">Assignment List</h4>
+              <div className="flex items-center gap-2">
+                <select
+                  className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                  value={assignmentForm.projectId}
+                  onChange={(e) => setAssignmentForm((prev) => ({ ...prev, projectId: e.target.value }))}
+                >
+                  {projectList.map((project) => (
+                    <option key={`list-project-${project.id}`} value={project.id}>
+                      {project.project_code}
+                    </option>
+                  ))}
+                </select>
+                <div className="relative">
+                  <button type="button" onClick={() => setExcelMenuOpen((prev) => !prev)} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">
+                    Excel ⬇
+                  </button>
+                  {excelMenuOpen && (
+                    <div className="absolute right-0 top-full z-10 mt-2 w-44 rounded-lg border border-steel/15 bg-white p-2 shadow-lg">
+                      <button type="button" onClick={() => { downloadScheduleTemplateCsv(); setExcelMenuOpen(false); }} className="w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-steel/10">Download Template</button>
+                      <label className="mt-1 block cursor-pointer rounded-md px-2 py-1.5 text-xs hover:bg-steel/10">
+                        Import CSV
+                        <input type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => { importScheduleCsv(event); setExcelMenuOpen(false); }} />
+                      </label>
+                      <button type="button" onClick={() => { exportScheduleCsv(); setExcelMenuOpen(false); }} className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-steel/10">Export CSV</button>
+                    </div>
+                  )}
+                </div>
+                <select className="rounded-lg border border-steel/20 px-3 py-2 text-xs" value={assignmentTradeFilter} onChange={(e) => setAssignmentTradeFilter(e.target.value)}>
+                  {tradeFilterOptions.map((item) => (
+                    <option key={item} value={item}>{item === "ALL" ? "All trade" : item}</option>
+                  ))}
+                </select>
+                <span className="text-xs text-graphite/60 whitespace-nowrap">{filteredAssignments.length} records</span>
+              </div>
+            </div>
             <input
               className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Search assignments by code/name/role"
+              placeholder="Search by code/name/role/trade"
               value={assignmentSearch}
               onChange={(e) => setAssignmentSearch(e.target.value)}
             />
-            <span className="text-xs text-graphite/60 whitespace-nowrap">{filteredAssignments.length} records</span>
-          </div>
 
-          <div className="mt-2 max-h-44 overflow-auto rounded-xl border border-steel/15">
+          <div className="mt-3 max-h-[70vh] overflow-auto rounded-xl border border-steel/15">
             <table className="min-w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-steel/15 bg-steel/5">
                   <th className="p-2 font-semibold text-steel">Employee</th>
-                  <th className="p-2 font-semibold text-steel">Stage</th>
-                  <th className="p-2 font-semibold text-steel">Role</th>
+                  <th className="p-2 font-semibold text-steel">Work Date</th>
+                  <th className="p-2 font-semibold text-steel">Shift / Status</th>
                   <th className="p-2 font-semibold text-steel">Action</th>
                 </tr>
               </thead>
@@ -928,9 +1636,30 @@ function ProjectsPage({
                 {pagedAssignments.map((item) => (
                   <tr key={item.id} className="border-b border-steel/10 hover:bg-steel/5">
                     <td className="p-2 text-graphite">{item.employee_code} - {item.full_name}</td>
-                    <td className="p-2 text-graphite">{item.stage_order ? `${item.stage_order}. ` : ""}{item.stage_name || "-"}</td>
-                    <td className="p-2 text-graphite">{item.assignment_role || "-"}</td>
-                    <td className="p-2"><button type="button" onClick={() => removeAssignment(item.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-2 py-1 text-xs font-semibold text-red-700 transition">Cancel</button></td>
+                    <td className="p-2 text-graphite">{item.stage_name || "-"}</td>
+                    <td className="p-2 text-graphite">{item.assignment_role || "-"} / {item.schedule_status || "-"} {item.trade_code ? `(${item.trade_code})` : ""}</td>
+                    <td className="p-2">
+                      {item.is_schedule_row ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => editScheduleAssignment(item)}
+                            className="rounded-lg bg-amber-100 hover:bg-amber-200 px-2 py-1 text-xs font-semibold text-amber-700 transition"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeScheduleAssignment(item)}
+                            className="rounded-lg bg-red-100 hover:bg-red-200 px-2 py-1 text-xs font-semibold text-red-700 transition"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ) : (
+                        <button type="button" onClick={() => removeAssignment(item.id)} className="rounded-lg bg-red-100 hover:bg-red-200 px-2 py-1 text-xs font-semibold text-red-700 transition">Cancel</button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -955,6 +1684,33 @@ function ProjectsPage({
               Next →
             </button>
           </div>
+          </div>
+          {quotaModalOpen && (
+            <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/40 p-4">
+              <div className="w-full max-w-lg rounded-xl border border-steel/15 bg-white p-4 shadow-xl">
+                <h5 className="text-sm font-bold text-steel">Set Workforce Quota</h5>
+                <p className="mt-1 text-xs text-graphite/70">Define required headcount per trade for selected date range.</p>
+                <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+                  {workforceTradeOptions.filter((trade) => trade !== "ALL").map((trade) => (
+                    <div key={`quota-${trade}`} className="grid grid-cols-[1fr_120px] items-center gap-2">
+                      <span className="text-xs font-semibold text-graphite">{trade}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={quotaDraft[trade] ?? ""}
+                        onChange={(e) => setQuotaDraft((prev) => ({ ...prev, [trade]: e.target.value }))}
+                        className="rounded-lg border border-steel/20 px-2 py-1.5 text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button type="button" onClick={() => setQuotaModalOpen(false)} className="rounded-lg bg-steel/10 px-3 py-1.5 text-xs font-semibold text-steel hover:bg-steel/20">Cancel</button>
+                  <button type="button" onClick={saveQuotaConfig} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700">Save Quota</button>
+                </div>
+              </div>
+            </div>
+          )}
           </section>
         )}
       </div>
@@ -966,7 +1722,7 @@ function ProjectsPage({
           <div className="flex w-full max-w-2xl items-center gap-2">
             <input
               className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Search projects by code/name/status/address"
+              placeholder="Search projects by code/name/status/address"
               value={projectSearch}
               onChange={(e) => setProjectSearch(e.target.value)}
             />
@@ -1194,6 +1950,7 @@ function TrackingPage({
   const [attendanceSearch, setAttendanceSearch] = useState("");
   const [locationPage, setLocationPage] = useState(1);
   const [attendancePage, setAttendancePage] = useState(1);
+  const [dailyOps, setDailyOps] = useState({ date: "", projectSummary: [], roster: [] });
 
   const filteredLocations = useMemo(() => {
     const keyword = locationSearch.trim().toLowerCase();
@@ -1238,9 +1995,23 @@ function TrackingPage({
 
       const locPath = `/attendance/location/latest${locationQuery.toString() ? `?${locationQuery}` : ""}`;
       const hisPath = `/attendance/history${historyQuery.toString() ? `?${historyQuery}` : ""}`;
-      const [loc, his] = await Promise.all([apiRequest(locPath, token), apiRequest(hisPath, token)]);
+      const opsQuery = new URLSearchParams();
+      opsQuery.set("date", filters.date || new Date().toISOString().slice(0, 10));
+      if (filters.projectId) {
+        opsQuery.set("projectId", filters.projectId);
+      }
+      const [loc, his, ops] = await Promise.all([
+        apiRequest(locPath, token),
+        apiRequest(hisPath, token),
+        apiRequest(`/projects/work-schedules/daily-ops?${opsQuery.toString()}`, token)
+      ]);
       setLocations(Array.isArray(loc) ? loc : []);
       setAttendance(Array.isArray(his) ? his : []);
+      setDailyOps({
+        date: ops?.date || "",
+        projectSummary: Array.isArray(ops?.projectSummary) ? ops.projectSummary : [],
+        roster: Array.isArray(ops?.roster) ? ops.roster : []
+      });
       setStatus("Tracking data loaded");
     } catch (error) {
       setStatus(`Failed to load tracking data: ${error.message}`);
@@ -1258,6 +2029,26 @@ function TrackingPage({
   useEffect(() => {
     setAttendancePage(1);
   }, [attendanceSearch, filters.projectId, filters.userId, filters.date]);
+
+  const opsTotals = useMemo(() => {
+    const rows = Array.isArray(dailyOps.projectSummary) ? dailyOps.projectSummary : [];
+    return rows.reduce(
+      (acc, row) => {
+        acc.assigned += Number(row.assigned_count || 0);
+        acc.checkedIn += Number(row.checked_in_count || 0);
+        acc.onTime += Number(row.on_time_count || 0);
+        acc.late += Number(row.late_count || 0);
+        acc.absent += Number(row.absent_count || 0);
+        return acc;
+      },
+      { assigned: 0, checkedIn: 0, onTime: 0, late: 0, absent: 0 }
+    );
+  }, [dailyOps.projectSummary]);
+
+  const onsiteRoster = useMemo(() => {
+    const rows = Array.isArray(dailyOps.roster) ? dailyOps.roster : [];
+    return rows.filter((row) => row.check_in_time);
+  }, [dailyOps.roster]);
 
   return (
     <section className="space-y-4">
@@ -1297,13 +2088,13 @@ function TrackingPage({
           >
             ↓ Export CSV
           </button>
-          <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Reload</button>
+          <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">Reload</button>
         </div>
       </div>
 
       <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
         <div className="flex items-center gap-2 mb-3">
-          <div className="rounded-lg bg-indigo-100 p-2"><span className="text-lg">🔍</span></div>
+          <div className="rounded-lg bg-indigo-100 p-2"><span className="text-lg"></span></div>
           <h3 className="text-base font-bold text-steel">Tracking Filters</h3>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
@@ -1323,17 +2114,76 @@ function TrackingPage({
         </div>
       </div>
 
+      <div className="grid gap-3 md:grid-cols-5">
+        <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Assigned Today</p><p className="text-xl font-bold text-steel">{opsTotals.assigned}</p></div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Checked-in</p><p className="text-xl font-bold text-cyan-700">{opsTotals.checkedIn}</p></div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">On Time</p><p className="text-xl font-bold text-emerald-700">{opsTotals.onTime}</p></div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Late</p><p className="text-xl font-bold text-amber-700">{opsTotals.late}</p></div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Absent</p><p className="text-xl font-bold text-rose-700">{opsTotals.absent}</p></div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft overflow-x-auto">
+          <h3 className="mb-2 text-base font-bold text-steel">Project Manpower Overview ({dailyOps.date || "today"})</h3>
+          <table className="min-w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-steel/20 bg-steel/5">
+                <th className="p-2 font-semibold text-steel">Project</th>
+                <th className="p-2 font-semibold text-steel">Assigned</th>
+                <th className="p-2 font-semibold text-steel">On-time</th>
+                <th className="p-2 font-semibold text-steel">Late</th>
+                <th className="p-2 font-semibold text-steel">Absent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dailyOps.projectSummary.map((row) => (
+                <tr key={`ops-${row.project_id}`} className="border-b border-steel/10">
+                  <td className="p-2">{row.project_code} - {row.project_name}</td>
+                  <td className="p-2">{row.assigned_count}</td>
+                  <td className="p-2">{row.on_time_count}</td>
+                  <td className="p-2">{row.late_count}</td>
+                  <td className="p-2">{row.absent_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+        <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft overflow-x-auto">
+          <h3 className="mb-2 text-base font-bold text-steel">Onsite Verification (Face + GPS)</h3>
+          <table className="min-w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-steel/20 bg-steel/5">
+                <th className="p-2 font-semibold text-steel">Employee</th>
+                <th className="p-2 font-semibold text-steel">Project</th>
+                <th className="p-2 font-semibold text-steel">Check-in</th>
+                <th className="p-2 font-semibold text-steel">Face Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {onsiteRoster.map((row) => (
+                <tr key={`onsite-${row.project_id}-${row.user_id}`} className="border-b border-steel/10">
+                  <td className="p-2">{row.employee_code} - {row.full_name}</td>
+                  <td className="p-2">{row.project_code}</td>
+                  <td className="p-2 text-xs">{row.check_in_time ? new Date(row.check_in_time).toLocaleString("en-GB") : "-"}</td>
+                  <td className="p-2">{row.face_score != null ? Number(row.face_score).toFixed(3) : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </div>
+
       <div className={`grid gap-4 ${showLocations && showAttendance ? "xl:grid-cols-2" : ""}`}>
         {showLocations && (
         <section className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft overflow-x-auto">
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-cyan-100 p-1.5"><span className="text-base">📍</span></div>
+              <div className="rounded-lg bg-cyan-100 p-1.5"><span className="text-base"></span></div>
               <h3 className="text-base font-bold text-steel">Latest employee locations</h3>
             </div>
             <input
               className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Search locations"
+              placeholder="Search locations"
               value={locationSearch}
               onChange={(e) => setLocationSearch(e.target.value)}
             />
@@ -1373,12 +2223,12 @@ function TrackingPage({
         <section className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft overflow-x-auto">
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-green-100 p-1.5"><span className="text-base">📋</span></div>
+              <div className="rounded-lg bg-green-100 p-1.5"><span className="text-base"></span></div>
               <h3 className="text-base font-bold text-steel">Attendance logs</h3>
             </div>
             <input
               className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-              placeholder="🔍 Search attendance"
+              placeholder="Search attendance"
               value={attendanceSearch}
               onChange={(e) => setAttendanceSearch(e.target.value)}
             />
@@ -2038,7 +2888,7 @@ function ProgressPage({ token, projects }) {
 
       <form onSubmit={submitProgress} className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
         <div className="flex items-center gap-2 mb-4">
-          <div className="rounded-lg bg-emerald-100 p-2"><span className="text-xl">📈</span></div>
+          <div className="rounded-lg bg-emerald-100 p-2"><span className="text-xl"></span></div>
           <h3 className="text-lg font-bold text-steel">Update Project Progress</h3>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
@@ -2072,9 +2922,9 @@ function ProgressPage({ token, projects }) {
           <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">⚠️ Invalid progress. Valid range is 0 to 100.</p>
         )}
         <div className="mt-4 flex flex-wrap gap-2">
-          <button type="submit" disabled={invalidProgress} className="rounded-lg bg-emerald-500 hover:bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 transition">📈 Update Progress</button>
+          <button type="submit" disabled={invalidProgress} className="rounded-lg bg-emerald-500 hover:bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 transition">Update Progress</button>
           <button type="button" onClick={autoSyncProgress} className="rounded-lg bg-sky-600 hover:bg-sky-700 px-4 py-2.5 text-sm font-semibold text-white transition">⚙️ Auto Sync Progress</button>
-          <button type="button" onClick={() => loadHistory(selectedProjectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">🔄 Reload History</button>
+          <button type="button" onClick={() => loadHistory(selectedProjectId)} className="rounded-lg bg-graphite hover:bg-graphite/90 px-4 py-2.5 text-sm font-semibold text-white transition">Reload History</button>
           <button
             type="button"
             onClick={() =>
@@ -2102,7 +2952,7 @@ function ProgressPage({ token, projects }) {
           <h3 className="text-lg font-bold text-steel">Progress History</h3>
           <input
             className="w-full max-w-xs rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
-            placeholder="🔍 Search progress history"
+            placeholder="Search progress history"
             value={historySearch}
             onChange={(e) => setHistorySearch(e.target.value)}
           />
@@ -2345,7 +3195,7 @@ function ReportsPage({ token }) {
               <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
             ))}
           </select>
-          <button type="button" onClick={() => { load(); loadProjectDetails(); }} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">🔄 Reload</button>
+          <button type="button" onClick={() => { load(); loadProjectDetails(); }} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">Reload</button>
         </div>
       </div>
       {status && status !== "Reports loaded" && status !== "Ready" && (
@@ -2593,7 +3443,7 @@ function ReportsPage({ token }) {
         <section className="rounded-2xl bg-gradient-to-br from-emerald-400 to-green-500 p-5 text-white shadow-lg overflow-hidden">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-white/20 p-2"><span className="text-xl">📊</span></div>
+              <div className="rounded-lg bg-white/20 p-2"><span className="text-xl"></span></div>
               <h3 className="text-lg font-bold">Project Progress</h3>
             </div>
             <button
@@ -2818,7 +3668,7 @@ function BudgetPage({ token, projects }) {
 
       <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
         <div className="mb-4 flex items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">💰 Project Budget</h3>
+          <h3 className="text-lg font-bold text-steel">Project Budget</h3>
           <div className="flex items-center gap-2">
             <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
               {projects.map((project) => (
@@ -3937,7 +4787,7 @@ function EquipmentFleetPage({ token, projects }) {
       <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="text-lg font-bold text-steel">🚜 Equipment Fleet Management</h3>
+            <h3 className="text-lg font-bold text-steel">Equipment Fleet Management</h3>
             <p className="text-xs text-graphite/60">Track vehicle/equipment records, drivers, and realtime operation logs</p>
           </div>
           <div className="flex items-center gap-2">
@@ -4450,7 +5300,7 @@ function ConstructionDiaryPage({ token, projects }) {
 
       <form onSubmit={submitDiary} className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">📝 Construction diary information</h3>
+          <h3 className="text-lg font-bold text-steel">Construction diary information</h3>
           <div className="flex items-center gap-2">
             <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
               {projects.map((project) => (
@@ -4947,7 +5797,7 @@ function MaterialsInventoryPage({ token, projects }) {
 
       <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">📦 Material management and stock tracking</h3>
+          <h3 className="text-lg font-bold text-steel">Material management and stock tracking</h3>
           <div className="flex items-center gap-2">
             <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={overPercentFilter} onChange={(e) => setOverPercentFilter(e.target.value)}>
               <option value="0">Usage over plan (0%)</option>
@@ -5121,6 +5971,7 @@ function TimekeepingPage({ token, projects, employees }) {
   const [logs, setLogs] = useState([]);
   const [locations, setLocations] = useState([]);
   const [filters, setFilters] = useState({ projectId: "", userId: "", date: "" });
+  const [quickFilter, setQuickFilter] = useState("ALL");
 
   useEffect(() => {
     if (!filters.projectId && projects[0]?.id) {
@@ -5179,6 +6030,69 @@ function TimekeepingPage({ token, projects, employees }) {
     return Array.from(map.values());
   }, [logs]);
 
+  const timesheetRows = useMemo(() => {
+    const parseDate = (value) => (value ? new Date(value) : null);
+    const hourDiff = (start, end) => (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+    return logs.map((item) => {
+      const inAt = parseDate(item.check_in_time);
+      const outAt = parseDate(item.check_out_time);
+      const employee = employees.find((row) => Number(row.id) === Number(item.user_id));
+      let actualHours = 0;
+      let otHours = 0;
+      let workValue = 0;
+      let statusText = String(item.attendance_status || "").toUpperCase();
+
+      if (inAt && outAt && outAt > inAt) {
+        let worked = hourDiff(inAt, outAt);
+        const lunchStart = new Date(inAt);
+        lunchStart.setHours(12, 0, 0, 0);
+        const lunchEnd = new Date(inAt);
+        lunchEnd.setHours(13, 0, 0, 0);
+        const overlapStart = Math.max(inAt.getTime(), lunchStart.getTime());
+        const overlapEnd = Math.min(outAt.getTime(), lunchEnd.getTime());
+        if (overlapEnd > overlapStart) {
+          worked -= (overlapEnd - overlapStart) / (1000 * 60 * 60);
+        }
+        actualHours = Math.max(0, Number(worked.toFixed(2)));
+        workValue = actualHours >= 8 ? 1 : actualHours >= 4 ? 0.5 : 0;
+        const overtimeThreshold = new Date(inAt);
+        overtimeThreshold.setHours(17, 0, 0, 0);
+        if (outAt > overtimeThreshold) {
+          otHours = Number((((outAt.getTime() - overtimeThreshold.getTime()) / (1000 * 60 * 60))).toFixed(2));
+        }
+      } else if (inAt && !outAt) {
+        statusText = "MISSING_OUT";
+        workValue = 0;
+      }
+
+      return {
+        id: item.id,
+        employee_code: item.employee_code,
+        full_name: item.full_name,
+        job_title: employee?.job_title || "-",
+        check_in_time: item.check_in_time,
+        check_out_time: item.check_out_time,
+        actual_hours: actualHours,
+        working_day_value: workValue,
+        ot_hours: otHours,
+        status: statusText || (outAt ? "COMPLETED" : "OPEN")
+      };
+    });
+  }, [logs, employees]);
+
+  const filteredTimesheetRows = useMemo(() => {
+    if (quickFilter === "MISSING_OUT") {
+      return timesheetRows.filter((row) => row.status === "MISSING_OUT");
+    }
+    if (quickFilter === "OT_ONLY") {
+      return timesheetRows.filter((row) => Number(row.ot_hours || 0) > 0);
+    }
+    if (quickFilter === "LATE_ONLY") {
+      return timesheetRows.filter((row) => row.status === "LATE");
+    }
+    return timesheetRows;
+  }, [timesheetRows, quickFilter]);
+
   return (
     <section className="space-y-4">
       {status && !["Ready", "Timekeeping loaded"].includes(status) && (
@@ -5224,6 +6138,52 @@ function TimekeepingPage({ token, projects, employees }) {
             Export logs
           </button>
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft overflow-x-auto">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h4 className="text-base font-bold text-steel">Daily Timesheet Board</h4>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setQuickFilter("ALL")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${quickFilter === "ALL" ? "bg-steel text-white" : "bg-steel/10 text-steel"}`}>All</button>
+            <button type="button" onClick={() => setQuickFilter("MISSING_OUT")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${quickFilter === "MISSING_OUT" ? "bg-rose-600 text-white" : "bg-rose-100 text-rose-700"}`}>MISSING_OUT</button>
+            <button type="button" onClick={() => setQuickFilter("OT_ONLY")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${quickFilter === "OT_ONLY" ? "bg-amber-600 text-white" : "bg-amber-100 text-amber-700"}`}>OT Only</button>
+          </div>
+        </div>
+        <table className="min-w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-steel/20 bg-steel/5">
+              <th className="p-2 font-semibold text-steel">Emp Code</th>
+              <th className="p-2 font-semibold text-steel">Name</th>
+              <th className="p-2 font-semibold text-steel">Job Title</th>
+              <th className="p-2 font-semibold text-steel">In</th>
+              <th className="p-2 font-semibold text-steel">Out</th>
+              <th className="p-2 font-semibold text-steel">Actual Hours</th>
+              <th className="p-2 font-semibold text-steel">Workday Value</th>
+              <th className="p-2 font-semibold text-steel">OT Hours</th>
+              <th className="p-2 font-semibold text-steel">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredTimesheetRows.map((row) => (
+              <tr key={`ts-${row.id}`} className="border-b border-steel/10">
+                <td className="p-2">{row.employee_code}</td>
+                <td className="p-2">{row.full_name}</td>
+                <td className="p-2">{row.job_title}</td>
+                <td className="p-2 text-xs">{row.check_in_time ? new Date(row.check_in_time).toLocaleString("en-GB") : "-"}</td>
+                <td className="p-2 text-xs">{row.check_out_time ? new Date(row.check_out_time).toLocaleString("en-GB") : "-"}</td>
+                <td className="p-2">{Number(row.actual_hours || 0).toFixed(2)}</td>
+                <td className="p-2">{Number(row.working_day_value || 0).toFixed(1)}</td>
+                <td className="p-2">{Number(row.ot_hours || 0).toFixed(2)}</td>
+                <td className="p-2">
+                  <span className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${row.status === "MISSING_OUT" ? "bg-rose-100 text-rose-700" : row.status === "LATE" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                    {row.status}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filteredTimesheetRows.length === 0 && <div className="py-4 text-center text-sm text-graphite/60">No rows for selected filter</div>}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -5340,7 +6300,7 @@ function ReportCenterPage({ token, projects }) {
 
       <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h3 className="text-lg font-bold text-steel">📊 Construction Report Center</h3>
+          <h3 className="text-lg font-bold text-steel">Construction Report Center</h3>
           <div className="flex gap-2">
             <button type="button" onClick={load} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">Reload</button>
             <button
@@ -5728,9 +6688,10 @@ function ProjectDashboardPage({ token, projects, onNavigate }) {
   );
 }
 
-export default function ManagerWorkspace({ token, profile }) {
+export default function ManagerWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
   const [projects, setProjects] = useState([]);
   const [employees, setEmployees] = useState([]);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   const loadMasterData = useCallback(async () => {
     const [projectData, userData] = await Promise.all([apiRequest("/projects", token), apiRequest("/users", token)]);
@@ -5745,32 +6706,99 @@ export default function ManagerWorkspace({ token, profile }) {
 
   const menuItems = useMemo(
     () => [
-      { key: "progress", label: "⏱ Progress" },
-      { key: "materials", label: "📦 Materials & plan" },
-      { key: "quantity", label: "📐 Quantity" },
-      { key: "workforce", label: "👷 Workforce" },
-      { key: "equipment", label: "🚜 Equipment" },
-      { key: "diary", label: "📝 Construction diary" },
-      { key: "rfx", label: "⚠️ RFx (submittal, issue)" },
-      { key: "cost", label: "💰 Project Budget" },
-      { key: "dashboard", label: "📊 Dashboard & reports" },
-      { key: "project-management", label: "🏗️ Manager project" }
+      { key: "attendance", label: "Real-time Attendance Dashboard" },
+      { key: "progress", label: "Progress" },
+      { key: "gps-location", label: "GPS Location" },
+      { key: "materials", label: "Materials & Planning" },
+      { key: "quantity", label: "Quantity" },
+      { key: "workforce", label: "Workforce" },
+      { key: "equipment", label: "Equipment" },
+      { key: "diary", label: "Construction Diary" },
+      { key: "rfx", label: "RFx" },
+      { key: "cost", label: "Project Budget" },
+      { key: "dashboard", label: "Dashboard & Reports" },
+      { key: "project-management", label: "Project Management" }
     ],
     []
   );
 
-  const [activePage, setActivePage] = useState("progress");
+  const [activePage, setActivePage] = useState("attendance");
 
   return (
     <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
-      <SidebarMenu
-        title={getTranslation("en", "managerWorkspace")}
-        items={menuItems}
-        activeKey={activePage}
-        onChange={setActivePage}
-      />
+      <aside className="lg:sticky lg:top-0 lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
+        <div className="mb-6 pb-4 border-b border-steel/10">
+          <h2 className="text-xl font-bold text-steel mb-2">Project Management</h2>
+          <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "Manager"}</p>
+          <div className="mt-3 relative">
+            <button
+              type="button"
+              onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+              className="w-full rounded-lg bg-gradient-to-r from-steel to-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:shadow-md transition"
+            >
+              Account Menu
+            </button>
+            {accountMenuOpen && (
+              <div className="absolute top-full mt-2 w-full z-[750] rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenProfileModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10 rounded-t-lg"
+                >
+                  Edit Profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenPasswordModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10"
+                >
+                  Change Password
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenLogoutModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-b-lg"
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <nav className="space-y-2.5">
+          {menuItems.map((item) => {
+            const active = item.key === activePage;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setActivePage(item.key)}
+                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-semibold transition-all duration-200 ${
+                  active
+                    ? "bg-gradient-to-r from-steel to-emerald-600 text-white shadow-lg"
+                    : "bg-slate-50/50 text-graphite hover:bg-white/80 hover:shadow-md"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
       <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
         {activePage === "progress" && <ProgressPage token={token} projects={projects} />}
+        {activePage === "gps-location" && <GPSLocationPage token={token} projects={projects} />}
+        {activePage === "diary" && <DiaryPage token={token} projects={projects} />}
+        {activePage === "materials" && <MaterialsPage token={token} projects={projects} />}
         {activePage === "attendance" && (
           <TrackingPage
             token={token}
@@ -5781,14 +6809,14 @@ export default function ManagerWorkspace({ token, profile }) {
             pageTitle="View worker attendance"
           />
         )}
-        {activePage === "materials" && <MaterialsInventoryPage token={token} projects={projects} />}
+        {activePage === "materials-inventory" && <MaterialsInventoryPage token={token} projects={projects} />}
         {activePage === "quantity" && (
           <ModuleCrudPage
             token={token}
             projects={projects}
             endpoint="plan-boq"
             title="Quantity"
-            icon="📐"
+            icon=""
             templatePath="/templates/boq-template.csv"
             fields={[
               { key: "itemType", apiKey: "itemType", label: "Type", type: "select", options: ["BOQ", "PLAN"], defaultValue: "BOQ" },
@@ -5835,6 +6863,7 @@ export default function ManagerWorkspace({ token, profile }) {
             reloadProjects={loadMasterData}
             showProjectManagement={false}
             showAssignmentManagement
+            workforceRole="PM"
           />
         )}
         {activePage === "equipment" && <EquipmentFleetPage token={token} projects={projects} />}
@@ -5903,18 +6932,11 @@ export default function ManagerWorkspace({ token, profile }) {
             reloadProjects={loadMasterData}
             showProjectManagement={false}
             showAssignmentManagement
+            workforceRole="PM"
           />
         )}
       </div>
     </section>
   );
 }
-
-
-
-
-
-
-
-
 

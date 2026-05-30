@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import SidebarMenu from "../SidebarMenu";
+import SystemSettingsPage from "./SystemSettings";
+import AuditLogPage from "./SystemAudit";
 import { apiRequest } from "../../lib/api";
 
 function resolveFullName(item) {
@@ -39,22 +41,12 @@ function StatusBanner({ message }) {
   );
 }
 
-function ModalCloseButton({ onClick }) {
-  return (
-    <button type="button" onClick={onClick} className="text-graphite hover:text-black">
-      x
-    </button>
-  );
-}
-
 function AccountsPage({ token, profile }) {
   const [accounts, setAccounts] = useState([]);
   const [status, setStatus] = useState("Ready");
   const [searchTerm, setSearchTerm] = useState("");
   const [roleFilter, setRoleFilter] = useState("ALL");
   const [sortMode, setSortMode] = useState("newest");
-  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
-  const [passwordForm, setPasswordForm] = useState({ userId: "", userName: "", newPassword: "", unlockAccount: true });
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -124,28 +116,13 @@ function AccountsPage({ token, profile }) {
     }
   };
 
-  const openPasswordModal = (account) => {
-    setPasswordModalOpen(true);
-    setPasswordForm({
-      userId: account.id,
-      userName: resolveFullName(account),
-      newPassword: "",
-      unlockAccount: true
-    });
-  };
-
-  const resetPassword = async () => {
+  const resetPassword = async (account) => {
     try {
-      if (!passwordForm.newPassword || passwordForm.newPassword.length < 6) {
-        setStatus("New password must be at least 6 characters");
-        return;
-      }
-      await apiRequest(`/auth/accounts/${passwordForm.userId}/password`, token, {
+      await apiRequest(`/auth/accounts/${account.id}/password`, token, {
         method: "PUT",
-        body: { newPassword: passwordForm.newPassword, unlockAccount: passwordForm.unlockAccount }
+        body: { newPassword: "123456", unlockAccount: true }
       });
-      setStatus("Password reset successfully");
-      setPasswordModalOpen(false);
+      setStatus(`Password reset to 123456 for ${resolveFullName(account)}`);
       await loadAccounts();
     } catch (error) {
       setStatus(`Password reset failed: ${error.message}`);
@@ -241,7 +218,7 @@ function AccountsPage({ token, profile }) {
                     <div>Locked until: {a.locked_until ? new Date(a.locked_until).toLocaleString() : "-"}</div>
                   </td>
                   <td className="p-3">
-                    <button type="button" onClick={() => openPasswordModal(a)} disabled={rowDisabled} className="rounded-lg bg-indigo-100 hover:bg-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition disabled:cursor-not-allowed disabled:opacity-50">Reset Password</button>
+                    <button type="button" onClick={() => resetPassword(a)} disabled={rowDisabled} className="rounded-lg bg-indigo-100 hover:bg-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition disabled:cursor-not-allowed disabled:opacity-50">Reset Password</button>
                   </td>
                 </tr>
               );
@@ -250,47 +227,93 @@ function AccountsPage({ token, profile }) {
         </table>
         {visibleAccounts.length === 0 && <p className="py-4 text-sm text-graphite/60">No matching accounts found.</p>}
       </section>
-
-      {passwordModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <h4 className="text-lg font-bold">Reset Password</h4>
-              <ModalCloseButton onClick={() => setPasswordModalOpen(false)} />
-            </div>
-            <div className="space-y-4">
-              <p className="text-sm text-graphite/70">User: <span className="font-semibold">{passwordForm.userName}</span></p>
-              <input className="w-full rounded-lg border border-steel/20 px-4 py-2.5 text-sm" type="password" placeholder="New password (min 6 chars)" value={passwordForm.newPassword} onChange={(e) => setPasswordForm((p) => ({ ...p, newPassword: e.target.value }))} />
-              <label className="flex items-center gap-2 text-sm text-graphite">
-                <input type="checkbox" checked={passwordForm.unlockAccount} onChange={(e) => setPasswordForm((p) => ({ ...p, unlockAccount: e.target.checked }))} />
-                Unlock account if currently locked
-              </label>
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setPasswordModalOpen(false)} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">Cancel</button>
-                <button type="button" onClick={resetPassword} className="rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm">Reset</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </section>
   );
 }
 
-export default function SystemAdminWorkspace({ token, profile }) {
-  const menuItems = useMemo(() => [{ key: "accounts", label: "System Accounts" }], []);
+export default function SystemAdminWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
+  const menuItems = useMemo(() => [
+    { key: "accounts", label: "Account Management" },
+    { key: "settings", label: "System Configuration" },
+    { key: "audit", label: "Audit Log" }
+  ], []);
   const [activePage, setActivePage] = useState("accounts");
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   return (
     <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
-      <SidebarMenu
-        title="System Administration"
-        items={menuItems}
-        activeKey={activePage}
-        onChange={setActivePage}
-      />
+      <aside className="lg:sticky lg:top-0 lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
+        <div className="mb-6 pb-4 border-b border-steel/10">
+          <h2 className="text-xl font-bold text-steel mb-2">System Administration</h2>
+          <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "System Admin"}</p>
+          <div className="mt-3 relative">
+            <button
+              type="button"
+              onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+              className="w-full rounded-lg bg-gradient-to-r from-steel to-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:shadow-md transition"
+            >
+              Account Menu
+            </button>
+            {accountMenuOpen && (
+              <div className="absolute top-full mt-2 w-full z-[750] rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenProfileModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10 rounded-t-lg"
+                >
+                  Edit Profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenPasswordModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10"
+                >
+                  Change Password
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenLogoutModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-b-lg"
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <nav className="space-y-2.5">
+          {menuItems.map((item) => {
+            const active = item.key === activePage;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setActivePage(item.key)}
+                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-semibold transition-all duration-200 ${
+                  active
+                    ? "bg-gradient-to-r from-steel to-emerald-600 text-white shadow-lg"
+                    : "bg-slate-50/50 text-graphite hover:bg-white/80 hover:shadow-md"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
       <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
-        <AccountsPage token={token} profile={profile} />
+        {activePage === "accounts" && <AccountsPage token={token} profile={profile} />}
+        {activePage === "settings" && <SystemSettingsPage token={token} />}
+        {activePage === "audit" && <AuditLogPage token={token} />}
       </div>
     </section>
   );

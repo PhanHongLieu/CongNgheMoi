@@ -55,7 +55,7 @@ app.get("/health", (req, res) => {
 
 app.post("/notifications", authenticate, async (req, res) => {
   try {
-    const { userId, title, message } = req.body;
+    const { userId, title, message, notificationType, priority, actionUrl } = req.body;
     const targetUserId = userId || req.user.sub;
 
     if (!title || !message) {
@@ -67,8 +67,18 @@ app.post("/notifications", authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      "INSERT INTO notifications (user_id, title, message) VALUES ($1,$2,$3) RETURNING *",
-      [targetUserId, title, message]
+      `INSERT INTO notifications (user_id, sender_user_id, notification_type, priority, title, message, action_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        targetUserId,
+        req.user.sub,
+        String(notificationType || "SYSTEM").slice(0, 40).toUpperCase(),
+        String(priority || "NORMAL").slice(0, 20).toUpperCase(),
+        title,
+        message,
+        actionUrl || null
+      ]
     );
 
     await writeDataLog({
@@ -112,7 +122,7 @@ app.put("/notifications/:id/read", authenticate, async (req, res) => {
     const notificationId = Number(req.params.id);
     const result = await pool.query(
       `UPDATE notifications
-       SET status = 'READ'
+       SET status = 'READ', read_at = NOW()
        WHERE id = $1 AND user_id = $2
        RETURNING *`,
       [notificationId, req.user.sub]

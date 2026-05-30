@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import SidebarMenu from "../SidebarMenu";
+import { ProjectsPage } from "./ManagerWorkspace";
+import RequestsManagementPage from "./HRRequests";
 import { apiRequest } from "../../lib/api";
 import { exportRowsToCsv } from "../../lib/csv";
 
@@ -119,7 +121,11 @@ function PersonnelPage({ token }) {
     birthDate: "",
     address: "",
     profileImageUrl: "",
-    employmentStatus: "WORKING"
+    employmentStatus: "WORKING",
+    jobTitle: "",
+    tradeCode: "",
+    skillLevel: "",
+    specialization: ""
   });
 
   const loadUsers = useCallback(async () => {
@@ -176,6 +182,11 @@ function PersonnelPage({ token }) {
       address: "",
       profileImageUrl: "",
       employmentStatus: "WORKING"
+      ,
+      jobTitle: "",
+      tradeCode: "",
+      skillLevel: "",
+      specialization: ""
     });
     setIsModalOpen(true);
   };
@@ -192,7 +203,11 @@ function PersonnelPage({ token }) {
       birthDate: formatDateDMY(user.birth_date),
       address: user.address || "",
       profileImageUrl: resolveProfileImage(user),
-      employmentStatus: String(user.status || "WORKING").toUpperCase()
+      employmentStatus: String(user.status || "WORKING").toUpperCase(),
+      jobTitle: user.job_title || "",
+      tradeCode: user.trade_code || "",
+      skillLevel: user.skill_level || "",
+      specialization: user.specialization || ""
     });
     setIsModalOpen(true);
   };
@@ -215,7 +230,11 @@ function PersonnelPage({ token }) {
         birthDate,
         address: modalForm.address,
         profileImageUrl: modalForm.profileImageUrl || null,
-        employmentStatus: modalForm.employmentStatus
+        employmentStatus: modalForm.employmentStatus,
+        jobTitle: modalForm.jobTitle || null,
+        tradeCode: modalForm.tradeCode || null,
+        skillLevel: modalForm.skillLevel || null,
+        specialization: modalForm.specialization || null
       };
 
       if (isEditing) {
@@ -300,6 +319,10 @@ function PersonnelPage({ token }) {
                 </select>
                 <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" type="text" placeholder="Birth Date (dd/mm/yyyy)" value={modalForm.birthDate} onChange={(e) => setModalForm((p) => ({ ...p, birthDate: e.target.value }))} />
                 <input className="md:col-span-2 rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Address" value={modalForm.address} onChange={(e) => setModalForm((p) => ({ ...p, address: e.target.value }))} />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Job Title (e.g. Site Engineer)" value={modalForm.jobTitle} onChange={(e) => setModalForm((p) => ({ ...p, jobTitle: e.target.value }))} />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Trade Code (e.g. STEEL)" value={modalForm.tradeCode} onChange={(e) => setModalForm((p) => ({ ...p, tradeCode: e.target.value.toUpperCase() }))} />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Skill Level (e.g. Senior)" value={modalForm.skillLevel} onChange={(e) => setModalForm((p) => ({ ...p, skillLevel: e.target.value }))} />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Specialization (optional)" value={modalForm.specialization} onChange={(e) => setModalForm((p) => ({ ...p, specialization: e.target.value }))} />
                 <div className="md:col-span-2">
                   <label className="mb-1 block text-xs text-graphite/70">Employment Status</label>
                   <select className="w-full rounded-lg border border-steel/20 px-4 py-2.5 text-sm" value={modalForm.employmentStatus} onChange={(e) => setModalForm((p) => ({ ...p, employmentStatus: e.target.value }))}>
@@ -340,6 +363,10 @@ function PersonnelPage({ token }) {
               <div className="rounded-lg bg-slate-50 p-3 md:col-span-2"><span className="font-semibold">Full Name:</span> {resolveFullName(viewUser)}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Phone:</span> {viewUser.phone || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Gender:</span> {viewUser.gender || "-"}</div>
+              <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Job Title:</span> {viewUser.job_title || "-"}</div>
+              <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Trade Code:</span> {viewUser.trade_code || "-"}</div>
+              <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Skill Level:</span> {viewUser.skill_level || "-"}</div>
+              <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Specialization:</span> {viewUser.specialization || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Birth Date:</span> {formatDateDMY(viewUser.birth_date) || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3 md:col-span-2"><span className="font-semibold">Address:</span> {viewUser.address || "-"}</div>
             </div>
@@ -385,7 +412,7 @@ function PersonnelPage({ token }) {
                   <div className="font-medium text-steel">{resolveFullName(u)}</div>
                   <div className="mt-1 inline-block rounded-full border border-cyan-200 bg-gradient-to-r from-cyan-50 to-blue-50 px-2 py-0.5 text-[11px] font-semibold text-cyan-700 shadow-sm ring-1 ring-cyan-100">{u.email || "-"}</div>
                 </td>
-                <td className="p-3">{u.role || "EMPLOYEE"}</td>
+                <td className="p-3">{u.job_title || u.role || "EMPLOYEE"}</td>
                 <td className="p-3">
                   <select
                     className={`rounded-lg border px-2 py-1 text-xs font-semibold ${String(u.status || "WORKING").toUpperCase() === "WORKING" ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-slate-300 bg-slate-100 text-slate-700"}`}
@@ -427,6 +454,7 @@ function AttendanceManagementPage({ token }) {
     checkOutTime: "",
     status: "CHECKED_IN"
   });
+  const [timesheetQuickFilter, setTimesheetQuickFilter] = useState("ALL");
 
   const loadFaceRows = useCallback(async () => {
     try {
@@ -466,10 +494,90 @@ function AttendanceManagementPage({ token }) {
   }, [loadFaceRows, loadProjects]);
 
   useEffect(() => {
-    if (activeTab === "history") {
+    if (activeTab === "history" || activeTab === "timesheet") {
       loadAttendanceHistory(selectedProjectId, selectedDate);
     }
   }, [activeTab, selectedProjectId, selectedDate, loadAttendanceHistory]);
+
+  const timesheetRows = useMemo(() => {
+    const parseDate = (value) => (value ? new Date(value) : null);
+    const hourDiff = (start, end) => (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+    const baseRows = historyRows.filter((row) => {
+      if (selectedProjectId && String(row.project_id || "") !== String(selectedProjectId)) {
+        return false;
+      }
+      if (selectedDate) {
+        const checkInDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : "";
+        if (checkInDate !== selectedDate) {
+          return false;
+        }
+      }
+      const keyword = historySearchTerm.trim().toLowerCase();
+      if (!keyword) {
+        return true;
+      }
+      const haystack = [row.full_name, row.employee_code, row.project_name]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(keyword);
+    });
+
+    return baseRows.map((row) => {
+      const checkIn = parseDate(row.check_in_time);
+      const checkOut = parseDate(row.check_out_time);
+      let actualHours = 0;
+      let workdayValue = 0;
+      let otHours = 0;
+      let statusText = String(row.attendance_status || "").toUpperCase();
+
+      if (checkIn && checkOut && checkOut > checkIn) {
+        let worked = hourDiff(checkIn, checkOut);
+        const lunchStart = new Date(checkIn);
+        lunchStart.setHours(12, 0, 0, 0);
+        const lunchEnd = new Date(checkIn);
+        lunchEnd.setHours(13, 0, 0, 0);
+        const overlapStart = Math.max(checkIn.getTime(), lunchStart.getTime());
+        const overlapEnd = Math.min(checkOut.getTime(), lunchEnd.getTime());
+        if (overlapEnd > overlapStart) {
+          worked -= (overlapEnd - overlapStart) / (1000 * 60 * 60);
+        }
+        actualHours = Math.max(0, Number(worked.toFixed(2)));
+        workdayValue = actualHours >= 8 ? 1 : actualHours >= 4 ? 0.5 : 0;
+        const otThreshold = new Date(checkIn);
+        otThreshold.setHours(17, 0, 0, 0);
+        if (checkOut > otThreshold) {
+          otHours = Number(((checkOut.getTime() - otThreshold.getTime()) / (1000 * 60 * 60)).toFixed(2));
+        }
+      } else if (checkIn && !checkOut) {
+        statusText = "MISSING_OUT";
+        workdayValue = 0;
+      }
+
+      return {
+        id: row.id,
+        employee_code: row.employee_code || "-",
+        full_name: row.full_name || "-",
+        project_name: row.project_name || "-",
+        check_in_time: row.check_in_time,
+        check_out_time: row.check_out_time,
+        actual_hours: actualHours,
+        workday_value: workdayValue,
+        ot_hours: otHours,
+        status: statusText || (checkOut ? "COMPLETED" : "OPEN")
+      };
+    });
+  }, [historyRows, selectedProjectId, selectedDate, historySearchTerm]);
+
+  const filteredTimesheetRows = useMemo(() => {
+    if (timesheetQuickFilter === "MISSING_OUT") {
+      return timesheetRows.filter((row) => row.status === "MISSING_OUT");
+    }
+    if (timesheetQuickFilter === "OT_ONLY") {
+      return timesheetRows.filter((row) => Number(row.ot_hours || 0) > 0);
+    }
+    return timesheetRows;
+  }, [timesheetRows, timesheetQuickFilter]);
 
   const filteredHistoryRows = useMemo(() => {
     const rows = historyRows.filter((row) => {
@@ -556,6 +664,19 @@ function AttendanceManagementPage({ token }) {
     }
   };
 
+  const reviewFaceEnrollment = async (userId, decision) => {
+    try {
+      await apiRequest(`/users/${userId}/face-enrollment/review`, token, {
+        method: "PUT",
+        body: { decision },
+        successMessage: `Face enrollment ${String(decision).toLowerCase()}`
+      });
+      await loadFaceRows();
+    } catch (error) {
+      setStatus(`Face enrollment review failed: ${error.message}`);
+    }
+  };
+
   return (
     <section className="space-y-4">
       <StatusBanner message={status} />
@@ -568,6 +689,9 @@ function AttendanceManagementPage({ token }) {
           </button>
           <button type="button" onClick={() => setActiveTab("history")} className={`rounded-lg px-4 py-2 text-sm font-semibold ${activeTab === "history" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>
             Attendance History
+          </button>
+          <button type="button" onClick={() => setActiveTab("timesheet")} className={`rounded-lg px-4 py-2 text-sm font-semibold ${activeTab === "timesheet" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>
+            Daily Timesheet Board
           </button>
         </div>
       </div>
@@ -586,7 +710,9 @@ function AttendanceManagementPage({ token }) {
               <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={faceFilter} onChange={(e) => setFaceFilter(e.target.value)}>
                 <option value="ALL">All status</option>
                 <option value="NOT_REGISTERED">Not registered</option>
-                <option value="REGISTERED">Registered</option>
+                <option value="PENDING">Pending approval</option>
+                <option value="APPROVED">Approved</option>
+                <option value="REJECTED">Rejected</option>
               </select>
             </div>
           </div>
@@ -606,8 +732,10 @@ function AttendanceManagementPage({ token }) {
                 .filter((row) => {
                   const matchFilter =
                     faceFilter === "ALL" ||
-                    (faceFilter === "REGISTERED" && row.has_face_template) ||
-                    (faceFilter === "NOT_REGISTERED" && !row.has_face_template);
+                    (faceFilter === "NOT_REGISTERED" && row.face_enrollment_status === "UNREGISTERED") ||
+                    (faceFilter === "PENDING" && row.face_enrollment_status === "PENDING") ||
+                    (faceFilter === "APPROVED" && row.face_enrollment_status === "APPROVED") ||
+                    (faceFilter === "REJECTED" && row.face_enrollment_status === "REJECTED");
                   if (!matchFilter) {
                     return false;
                   }
@@ -625,13 +753,23 @@ function AttendanceManagementPage({ token }) {
                   <td className="p-3">{row.full_name}</td>
                   <td className="p-3">{row.email}</td>
                   <td className="p-3">
-                    {row.has_face_template ? (
+                    {row.face_enrollment_status === "APPROVED" ? (
                       <span className="inline-flex rounded-full border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">REGISTERED</span>
+                    ) : row.face_enrollment_status === "PENDING" ? (
+                      <span className="inline-flex rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">PENDING APPROVAL</span>
+                    ) : row.face_enrollment_status === "REJECTED" ? (
+                      <span className="inline-flex rounded-full border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">REJECTED</span>
                     ) : (
                       <span className="inline-flex rounded-full border border-red-300 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">NOT REGISTERED</span>
                     )}
                   </td>
                   <td className="p-3 space-x-1">
+                    {row.face_enrollment_status === "PENDING" && (
+                      <>
+                        <button type="button" onClick={() => reviewFaceEnrollment(row.id, "APPROVED")} className="rounded-lg bg-emerald-100 hover:bg-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700">Approve</button>
+                        <button type="button" onClick={() => reviewFaceEnrollment(row.id, "REJECTED")} className="rounded-lg bg-rose-100 hover:bg-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Reject</button>
+                      </>
+                    )}
                     <button type="button" onClick={() => resetFaceTemplate(row.id)} className="rounded-lg bg-indigo-100 hover:bg-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-700">Reset</button>
                   </td>
                 </tr>
@@ -784,6 +922,58 @@ function AttendanceManagementPage({ token }) {
               </div>
             </div>
           )}
+        </section>
+      )}
+
+      {activeTab === "timesheet" && (
+        <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-base font-bold text-steel">Daily Timesheet Board</h4>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setTimesheetQuickFilter("ALL")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "ALL" ? "bg-steel text-white" : "bg-steel/10 text-steel"}`}>All</button>
+              <button type="button" onClick={() => setTimesheetQuickFilter("MISSING_OUT")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "MISSING_OUT" ? "bg-rose-600 text-white" : "bg-rose-100 text-rose-700"}`}>MISSING_OUT</button>
+              <button type="button" onClick={() => setTimesheetQuickFilter("OT_ONLY")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "OT_ONLY" ? "bg-amber-600 text-white" : "bg-amber-100 text-amber-700"}`}>OT Only</button>
+            </div>
+          </div>
+          <table className="min-w-full text-left text-sm">
+            <thead>
+              <tr className="border-b-2 border-steel/20 bg-steel/5">
+                <th className="p-3">Mã NV</th>
+                <th className="p-3">Tên</th>
+                <th className="p-3">Project</th>
+                <th className="p-3">Giờ Vào</th>
+                <th className="p-3">Giờ Ra</th>
+                <th className="p-3">Giờ thực tế</th>
+                <th className="p-3">Hệ số công</th>
+                <th className="p-3">OT</th>
+                <th className="p-3">Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredTimesheetRows.map((row) => (
+                <tr key={row.id} className="border-b border-steel/10">
+                  <td className="p-3">{row.employee_code}</td>
+                  <td className="p-3">{row.full_name}</td>
+                  <td className="p-3">{row.project_name}</td>
+                  <td className="p-3">{row.check_in_time ? new Date(row.check_in_time).toLocaleString() : "-"}</td>
+                  <td className="p-3">{row.check_out_time ? new Date(row.check_out_time).toLocaleString() : "-"}</td>
+                  <td className="p-3">{Number(row.actual_hours || 0).toFixed(2)}</td>
+                  <td className="p-3">{Number(row.workday_value || 0).toFixed(1)}</td>
+                  <td className="p-3">{Number(row.ot_hours || 0).toFixed(2)}</td>
+                  <td className="p-3">
+                    <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${row.status === "MISSING_OUT" ? "bg-rose-100 text-rose-700" : Number(row.ot_hours || 0) > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {filteredTimesheetRows.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="p-4 text-center text-graphite/60">No timesheet rows for selected filters.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </section>
       )}
     </section>
@@ -1215,29 +1405,143 @@ function SalaryManagementPage({ token }) {
   );
 }
 
-export default function AdminWorkspace({ token }) {
+function WorkforceAssignmentPage({ token }) {
+  const [projects, setProjects] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [status, setStatus] = useState("Ready");
+
+  const loadProjects = useCallback(async () => {
+    try {
+      const rows = await apiRequest("/projects", token);
+      setProjects(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      setStatus(`Failed to load projects: ${error.message}`);
+    }
+  }, [token]);
+
+  const loadEmployees = useCallback(async () => {
+    try {
+      const rows = await apiRequest("/users", token);
+      const normalized = (Array.isArray(rows) ? rows : []).filter((item) => String(item.role || item.account_role || "").toUpperCase() === "EMPLOYEE");
+      setEmployees(normalized);
+    } catch (error) {
+      setStatus(`Failed to load employees: ${error.message}`);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    loadProjects();
+    loadEmployees();
+  }, [loadProjects, loadEmployees]);
+
+  return (
+    <section className="space-y-4">
+      {status !== "Ready" && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{status}</div>
+      )}
+      <ProjectsPage
+        token={token}
+        projects={projects}
+        employees={employees}
+        reloadProjects={loadProjects}
+        showProjectManagement={false}
+        showAssignmentManagement
+        workforceRole="HR"
+      />
+    </section>
+  );
+}
+
+export default function AdminWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
   const menuItems = useMemo(
     () => [
-      { key: "personnel", label: "Personnel Management" },
       { key: "attendance", label: "Attendance Management" },
-      { key: "salary", label: "💰 Salary Management" }
+      { key: "personnel", label: "Personnel Management" },
+      { key: "workforce", label: "Workforce Assignment" },
+      { key: "requests", label: "Request Management" },
+      { key: "salary", label: "Salary Management" }
     ],
     []
   );
 
-  const [activePage, setActivePage] = useState("personnel");
+  const [activePage, setActivePage] = useState("attendance");
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   return (
     <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
-      <SidebarMenu
-        title="HR Management"
-        items={menuItems}
-        activeKey={activePage}
-        onChange={setActivePage}
-      />
+      <aside className="lg:sticky lg:top-0 lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
+        <div className="mb-6 pb-4 border-b border-steel/10">
+          <h2 className="text-xl font-bold text-steel mb-2">HR Administration</h2>
+          <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "Administrator"}</p>
+          <div className="mt-3 relative">
+            <button
+              type="button"
+              onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+              className="w-full rounded-lg bg-gradient-to-r from-steel to-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:shadow-md transition"
+            >
+              Account Menu
+            </button>
+            {accountMenuOpen && (
+              <div className="absolute top-full mt-2 w-full z-[750] rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenProfileModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10 rounded-t-lg"
+                >
+                  Edit Profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenPasswordModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-graphite hover:bg-steel/10"
+                >
+                  Change Password
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenLogoutModal();
+                    setAccountMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-b-lg"
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <nav className="space-y-2.5">
+          {menuItems.map((item) => {
+            const active = item.key === activePage;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setActivePage(item.key)}
+                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-semibold transition-all duration-200 ${
+                  active
+                    ? "bg-gradient-to-r from-steel to-emerald-600 text-white shadow-lg"
+                    : "bg-slate-50/50 text-graphite hover:bg-white/80 hover:shadow-md"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
       <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
         {activePage === "personnel" && <PersonnelPage token={token} />}
+        {activePage === "workforce" && <WorkforceAssignmentPage token={token} />}
         {activePage === "attendance" && <AttendanceManagementPage token={token} />}
+        {activePage === "requests" && <RequestsManagementPage token={token} />}
         {activePage === "salary" && <SalaryManagementPage token={token} />}
       </div>
     </section>

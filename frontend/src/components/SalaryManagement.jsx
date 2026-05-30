@@ -118,7 +118,7 @@ export default function SalaryManagement({ token }) {
     <section className="space-y-6 rounded-3xl bg-white/80 p-8 shadow-soft backdrop-blur">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-3xl font-bold text-steel">💰 Salary Management</h2>
+          <h2 className="text-3xl font-bold text-steel">Salary Management</h2>
           <p className="text-steel/70">Calculate, review and manage employee salaries</p>
         </div>
         <div className="flex gap-3">
@@ -132,7 +132,7 @@ export default function SalaryManagement({ token }) {
             onClick={() => loadSalaries()}
             className="rounded-xl bg-steel hover:bg-steel/90 px-6 py-3 text-sm font-semibold text-white transition"
           >
-            🔄 Reload
+            Reload
           </button>
         </div>
       </div>
@@ -148,7 +148,7 @@ export default function SalaryManagement({ token }) {
       <div className="grid gap-4 lg:grid-cols-4">
         <input
           className="rounded-xl border border-steel/20 px-4 py-3 text-sm focus:border-steel focus:outline-none focus:ring-2 focus:ring-steel/20"
-          placeholder="🔍 Search employee/code"
+          placeholder="Search employee/code"
           value={salarySearch}
           onChange={(e) => setSalarySearch(e.target.value)}
         />
@@ -213,7 +213,7 @@ export default function SalaryManagement({ token }) {
             disabled={calculating || !monthForCalc || !yearForCalc}
             className="rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-8 py-3 text-sm font-semibold text-white transition flex items-center gap-2"
           >
-            {calculating ? "⏳ Calculating..." : "💰 Calculate & Save"}
+            {calculating ? "Calculating..." : "Calculate & Save"}
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import AdminWorkspace from "./components/workspaces/AdminWorkspace";
 import EmployeeWorkspace from "./components/workspaces/EmployeeWorkspace";
 import ManagerWorkspace from "./components/workspaces/ManagerWorkspace";
@@ -12,8 +12,6 @@ import {
 
 const API_BASE = "http://localhost:8080/api";
 const FACE_MODEL_URL = `${import.meta.env.BASE_URL || "/"}models`;
-const RECAPTCHA_SITE_KEY = String(import.meta.env.VITE_RECAPTCHA_SITE_KEY || "").trim();
-const RECAPTCHA_ACTION = import.meta.env.VITE_RECAPTCHA_ACTION || "login";
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -24,13 +22,36 @@ function fileToDataUrl(file) {
   });
 }
 
+function shrinkDataUrlImage(dataUrl, maxWidth = 640, quality = 0.75) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const ratio = img.width > maxWidth ? maxWidth / img.width : 1;
+      const width = Math.max(1, Math.round(img.width * ratio));
+      const height = Math.max(1, Math.round(img.height * ratio));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 const FACE_ENROLL_STEPS = [
-  { key: "front", label: "Front Face", hint: "Look straight at the camera." },
-  { key: "left", label: "Left Angle", hint: "Turn face slightly to the left." },
-  { key: "right", label: "Right Angle", hint: "Turn face slightly to the right." },
-  { key: "up", label: "Up Angle", hint: "Raise chin slightly and look up." },
-  { key: "down", label: "Down Angle", hint: "Lower chin slightly and look down." },
-  { key: "eyes", label: "Eyes Focus", hint: "Keep eyes open and look directly into camera." }
+  { key: "front", label: "Front view", hint: "Look straight into the camera." },
+  { key: "left", label: "Left angle", hint: "Turn slightly to your left." },
+  { key: "right", label: "Right angle", hint: "Turn slightly to your right." },
+  { key: "up", label: "Up angle", hint: "Raise your chin slightly and look up." },
+  { key: "down", label: "Down angle", hint: "Lower your chin slightly and look down." },
+  { key: "eyes", label: "Eyes focus", hint: "Keep eyes open and look directly at camera." }
 ];
 
 function hasFaceTemplate(value) {
@@ -143,8 +164,6 @@ function isTokenExpired(token) {
 export default function App() {
   const [employeeCode, setEmployeeCode] = useState("00000004");
   const [password, setPassword] = useState("admin123");
-  const [recaptchaToken, setRecaptchaToken] = useState("");
-  const [recaptchaReady, setRecaptchaReady] = useState(false);
   const [token, setToken] = useState("");
   const [profile, setProfile] = useState(null);
   const [message, setMessage] = useState(getTranslation("en", "loginMessage"));
@@ -181,11 +200,10 @@ export default function App() {
   const [faceEnrollError, setFaceEnrollError] = useState("");
   const [faceAiStatus, setFaceAiStatus] = useState("Initializing face scanner...");
   const [faceModelsLoaded, setFaceModelsLoaded] = useState(false);
+  const [faceEnrollmentStatus, setFaceEnrollmentStatus] = useState("UNREGISTERED");
   const faceVideoRef = useRef(null);
   const faceCanvasRef = useRef(null);
   const faceOverlayRef = useRef(null);
-  const recaptchaContainerRef = useRef(null);
-  const recaptchaWidgetIdRef = useRef(null);
   const faceDetectTimerRef = useRef(null);
   const faceCaptureLockRef = useRef(false);
   const faceLastCaptureAtRef = useRef(0);
@@ -422,15 +440,17 @@ export default function App() {
   useEffect(() => {
     if (!token || !profile?.id) {
       setFaceEnrollOpen(false);
+      setFaceEnrollmentStatus("UNREGISTERED");
       return;
     }
     if (profile?.role === "SUPER_ADMIN" || profile?.role === "ADMIN" || profile?.role === "HR_MANAGER") {
       setFaceEnrollOpen(false);
+      setFaceEnrollmentStatus("APPROVED");
       return;
     }
 
     let cancelled = false;
-    const checkFaceTemplate = async () => {
+    const checkFaceEnrollment = async () => {
       try {
         setFaceEnrollChecking(true);
         const response = await fetch(`${API_BASE}/users/${profile.id}`, {
@@ -440,15 +460,11 @@ export default function App() {
         if (!response.ok) {
           throw new Error(data?.message || "Unable to check face registration");
         }
-        if (!cancelled && !hasFaceTemplate(data.face_template)) {
-          setFaceEnrollOpen(true);
-          setFaceEnrollStep(0);
-          setFaceEnrollCaptures({});
-          setFaceEnrollSignatures({});
-          setFaceEnrollEmbeddings({});
-          setFaceEnrollError("");
-          setFaceAiStatus("Initializing face scanner...");
+        if (cancelled) {
+          return;
         }
+        const fallbackStatus = hasFaceTemplate(data.face_template) ? "APPROVED" : "UNREGISTERED";
+        setFaceEnrollmentStatus(String(data.face_enrollment_status || fallbackStatus).toUpperCase());
       } catch (error) {
         if (!cancelled) {
           pushToast("error", error.message);
@@ -460,11 +476,11 @@ export default function App() {
       }
     };
 
-    checkFaceTemplate();
+    checkFaceEnrollment();
     return () => {
       cancelled = true;
     };
-  }, [token, profile?.id]);
+  }, [token, profile?.id, profile?.role]);
 
   useEffect(() => {
     if (!faceEnrollOpen) {
@@ -550,106 +566,14 @@ export default function App() {
     []
   );
 
-  const resetGoogleRecaptcha = () => {
-    setRecaptchaToken("");
-    if (window.grecaptcha && recaptchaWidgetIdRef.current != null) {
-      window.grecaptcha.reset(recaptchaWidgetIdRef.current);
-    }
-  };
-
-  useEffect(() => {
-    if (token) {
-      return;
-    }
-    if (!RECAPTCHA_SITE_KEY) {
-      setRecaptchaReady(false);
-      setMessage("Google reCAPTCHA is not configured. Please set VITE_RECAPTCHA_SITE_KEY.");
-      return;
-    }
-
-    let cancelled = false;
-    let observedScript = null;
-    setRecaptchaReady(false);
-    setRecaptchaToken("");
-
-    const desiredSrc = "https://www.google.com/recaptcha/api.js?render=explicit";
-
-    const renderWidget = () => {
-      if (cancelled || !window.grecaptcha || !recaptchaContainerRef.current) {
-        return;
-      }
-      if (recaptchaWidgetIdRef.current == null) {
-        recaptchaWidgetIdRef.current = window.grecaptcha.render(recaptchaContainerRef.current, {
-          sitekey: RECAPTCHA_SITE_KEY,
-          callback: (value) => setRecaptchaToken(String(value || "")),
-          "expired-callback": () => setRecaptchaToken(""),
-          "error-callback": () => setRecaptchaToken("")
-        });
-      }
-      setRecaptchaReady(true);
-    };
-
-    const handleLoad = () => {
-      if (!window.grecaptcha) {
-        return;
-      }
-      window.grecaptcha.ready(renderWidget);
-    };
-
-    const handleError = () => {
-      if (!cancelled) {
-        setMessage("Unable to load Google reCAPTCHA script");
-      }
-    };
-
-    let script = document.getElementById("google-recaptcha-script");
-    if (script && script.getAttribute("src") !== desiredSrc) {
-      script.remove();
-      script = null;
-    }
-
-    if (!script) {
-      script = document.createElement("script");
-      script.id = "google-recaptcha-script";
-      script.src = desiredSrc;
-      script.async = true;
-      script.defer = true;
-      document.head.appendChild(script);
-    }
-
-    observedScript = script;
-
-    handleLoad();
-    if (!window.grecaptcha) {
-      observedScript.addEventListener("load", handleLoad);
-      observedScript.addEventListener("error", handleError);
-    }
-
-    return () => {
-      cancelled = true;
-      if (observedScript) {
-        observedScript.removeEventListener("load", handleLoad);
-        observedScript.removeEventListener("error", handleError);
-      }
-    };
-  }, [token]);
-
   const login = async (event) => {
     event.preventDefault();
-    if (!recaptchaReady) {
-      setMessage("Google reCAPTCHA is still loading. Please try again in a moment.");
-      return;
-    }
-    if (!recaptchaToken) {
-      setMessage("Please complete Google reCAPTCHA");
-      return;
-    }
 
     try {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ employeeCode, password, recaptchaToken })
+        body: JSON.stringify({ employeeCode, password })
       });
 
       const rawBody = await response.text();
@@ -661,7 +585,6 @@ export default function App() {
       }
 
       if (!response.ok) {
-        resetGoogleRecaptcha();
         if (data?.lockedUntil) {
           const lockUntilText = new Date(data.lockedUntil).toLocaleString();
           setMessage(`${data.message || "Account is locked."} Locked until: ${lockUntilText}`);
@@ -673,12 +596,10 @@ export default function App() {
 
       setToken(data.accessToken);
       setProfile(data.user);
-      setRecaptchaToken("");
       localStorage.setItem("mdp_access_token", data.accessToken);
       localStorage.setItem("mdp_profile", JSON.stringify(data.user));
       setMessage(`Logged in successfully as ${data.user.role}`);
     } catch (error) {
-      resetGoogleRecaptcha();
       setMessage(`Connection error: ${error.message}`);
     }
   };
@@ -883,10 +804,10 @@ export default function App() {
       version: 4,
       capturedAt: new Date().toISOString(),
       embeddingDim: FACE_EMBEDDING_DIM,
-      primaryTemplate: faceEnrollCaptures.front,
+      primaryTemplate: "",
       primarySignature: normalizedSignatures.front || "",
       primaryEmbedding: normalizedEmbeddings.front || [],
-      samples: faceEnrollCaptures,
+      sampleUrls: {},
       signatures: normalizedSignatures,
       embeddings: normalizedEmbeddings,
       livenessProfile: {
@@ -899,6 +820,27 @@ export default function App() {
 
     try {
       setFaceEnrollSaving(true);
+      setFaceAiStatus("Optimizing face samples...");
+      const optimizedSamples = {};
+      for (const [step, sampleDataUrl] of Object.entries(faceEnrollCaptures)) {
+        optimizedSamples[step] = await shrinkDataUrlImage(sampleDataUrl);
+      }
+      setFaceAiStatus("Uploading samples to storage...");
+      const uploadResponse = await fetch(`${API_BASE}/users/${profile.id}/face-enrollment/samples-upload`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ samples: optimizedSamples })
+      });
+      const uploadData = await uploadResponse.json();
+      if (!uploadResponse.ok) {
+        throw new Error(uploadData?.message || "Failed to upload face samples");
+      }
+      payload.sampleUrls = uploadData.sampleUrls || {};
+
+      setFaceAiStatus("Saving enrollment metadata...");
       const response = await fetch(`${API_BASE}/users/${profile.id}/face-template`, {
         method: "PUT",
         headers: {
@@ -917,9 +859,11 @@ export default function App() {
       setFaceEnrollEmbeddings({});
       setFaceEnrollStep(0);
       setFaceEnrollError("");
+      setFaceEnrollmentStatus("PENDING");
       stopFaceEnrollCamera();
-      pushToast("success", "Face registration completed successfully");
-      setMessage("Face registration completed successfully");
+      setFaceAiStatus("Enrollment submitted successfully.");
+      pushToast("success", "Face enrollment submitted. Waiting for HR approval.");
+      setMessage("Face enrollment submitted. Waiting for HR approval.");
     } catch (error) {
       setFaceEnrollError(error.message);
     } finally {
@@ -933,18 +877,28 @@ export default function App() {
     }
 
     if (profile.role === "SUPER_ADMIN" || profile.role === "ADMIN") {
-      return <SystemAdminWorkspace token={token} profile={profile} />;
+      return <SystemAdminWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
     if (profile.role === "HR_MANAGER") {
-      return <AdminWorkspace token={token} profile={profile} />;
+      return <AdminWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
     if (profile.role === "PROJECT_MANAGER") {
-      return <ManagerWorkspace token={token} profile={profile} />;
+      return <ManagerWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
-    return <EmployeeWorkspace token={token} profile={profile} />;
+    return (
+      <EmployeeWorkspace
+        token={token}
+        profile={profile}
+        onOpenProfileModal={openProfileModal}
+        onOpenPasswordModal={openPasswordModal}
+        onOpenLogoutModal={openLogoutModal}
+        onOpenFaceEnrollModal={() => setFaceEnrollOpen(true)}
+        faceEnrollmentStatus={faceEnrollmentStatus}
+      />
+    );
   };
 
   return (
@@ -1036,11 +990,16 @@ export default function App() {
       {faceEnrollOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-4xl rounded-2xl bg-white p-6 shadow-2xl">
-            <div className="mb-4">
-              <h3 className="text-xl font-bold text-steel">Face Enrollment Required</h3>
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+              <h3 className="text-xl font-bold text-steel">Face Enrollment</h3>
               <p className="text-sm text-graphite/70">
-                First login requires AI face enrollment. Keep your face inside frame and follow each pose automatically.
+                Capture your face in a well-lit place. Complete all required angles and submit for HR approval.
               </p>
+              </div>
+              <button type="button" onClick={() => setFaceEnrollOpen(false)} className="rounded-lg border border-steel/20 px-3 py-1.5 text-sm text-graphite hover:bg-slate-50">
+                Close
+              </button>
             </div>
 
             <div className="space-y-3">
@@ -1082,7 +1041,7 @@ export default function App() {
                     disabled={faceEnrollSaving}
                     className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
                   >
-                    {faceEnrollSaving ? "Saving..." : "Finish Registration"}
+                    {faceEnrollSaving ? "Submitting..." : "Submit for HR Approval"}
                   </button>
                 </div>
               </div>
@@ -1100,7 +1059,7 @@ export default function App() {
           <div className="w-full max-w-md">
             <header className="space-y-4 text-center mb-8">
               <p className="inline-block rounded-full bg-gradient-to-r from-copper/15 to-steel/15 px-4 py-1.5 text-xs font-semibold uppercase tracking-widest text-copper">
-                ?? {getTranslation("en", "platform")}
+                {getTranslation("en", "platform")}
               </p>
               <h1 className="text-5xl font-bold bg-gradient-to-r from-steel via-blue-600 to-emerald-600 bg-clip-text text-transparent">
                 {getTranslation("en", "title")}
@@ -1133,11 +1092,6 @@ export default function App() {
                     required
                   />
                 </label>
-                <div className="grid gap-2 rounded-xl border border-steel/15 bg-white px-3 py-3 text-sm text-graphite/80">
-                  <span className="font-medium text-graphite">Google reCAPTCHA</span>
-                  <div ref={recaptchaContainerRef} className="min-h-[78px]" />
-                  {!recaptchaReady && <p className="text-xs text-graphite/70">Loading reCAPTCHA widget...</p>}
-                </div>
                 <button className="rounded-xl bg-gradient-to-r from-steel to-emerald-600 px-4 py-2.5 font-semibold text-white hover:shadow-lg transition-all" type="submit">
                   {getTranslation("en", "loginBtn")}
                 </button>
@@ -1147,111 +1101,13 @@ export default function App() {
           </div>
         </div>
       ) : (
-        <div className="flex flex-col h-full">
-          <nav className="relative z-[700] border-b border-white/40 bg-white/60 backdrop-blur-md shadow-sm">
-            <div className="flex items-center justify-between px-6 py-4">
-              <div>
-                <h2 className="text-lg font-bold bg-gradient-to-r from-steel to-emerald-600 bg-clip-text text-transparent">
-                  {getTranslation("en", "mdpPlatform")}
-                </h2>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNotificationOpen((prev) => !prev);
-                      setAccountMenuOpen(false);
-                    }}
-                    className="rounded-lg bg-steel/10 p-2 text-sm font-semibold text-steel hover:bg-steel/20 transition-all"
-                    aria-label="Notifications"
-                    title="Notifications"
-                  >
-                    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5" />
-                      <path d="M9.5 17a2.5 2.5 0 0 0 5 0" />
-                    </svg>
-                  </button>
-                  {notificationOpen && (
-                    <div className="absolute right-0 z-[750] mt-2 w-72 rounded-xl border border-steel/15 bg-white p-3 shadow-xl">
-                      <p className="text-sm font-semibold text-steel">Notifications</p>
-                      <p className="mt-2 text-sm text-graphite/70">No new notifications.</p>
-                    </div>
-                  )}
-                </div>
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAccountMenuOpen((prev) => !prev);
-                      setNotificationOpen(false);
-                    }}
-                    className="rounded-full bg-gradient-to-br from-steel to-emerald-600 p-2 text-white shadow-sm transition-all hover:shadow-md"
-                    aria-label="Account"
-                    title={profile?.fullName || "Account"}
-                  >
-                    {profile?.profileImageUrl ? (
-                      <img src={profile.profileImageUrl} alt="Account" className="h-5 w-5 rounded-full object-cover" />
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M20 21a8 8 0 0 0-16 0" />
-                        <circle cx="12" cy="7" r="4" />
-                      </svg>
-                    )}
-                  </button>
-                  {accountMenuOpen && (
-                    <div className="absolute right-0 z-[750] mt-2 w-64 rounded-xl border border-steel/15 bg-white p-2 shadow-xl">
-                      <div className="border-b border-steel/10 px-2 py-2">
-                        <p className="text-sm font-semibold text-steel">{profile?.fullName || "User"}</p>
-                        <p className="text-xs text-graphite/70">{profile?.email || ""}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={openProfileModal}
-                        className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-graphite hover:bg-steel/10"
-                      >
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-steel" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5z" />
-                          <path d="M3 21a9 9 0 0 1 18 0" />
-                        </svg>
-                        Edit Profile
-                      </button>
-                      <button
-                        type="button"
-                        onClick={openPasswordModal}
-                        className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-graphite hover:bg-steel/10"
-                      >
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-steel" fill="none" stroke="currentColor" strokeWidth="2">
-                          <rect x="3" y="11" width="18" height="10" rx="2" />
-                          <path d="M7 11V8a5 5 0 0 1 10 0v3" />
-                        </svg>
-                        Change Password
-                      </button>
-                      <button
-                        type="button"
-                        onClick={openLogoutModal}
-                        className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-red-600 hover:bg-red-50"
-                      >
-                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                          <path d="M16 17l5-5-5-5" />
-                          <path d="M21 12H9" />
-                        </svg>
-                        Sign Out
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </nav>
-          <div className="relative z-0 flex-1 overflow-auto p-6">
-            {renderDashboardByRole()}
-          </div>
+        <div className="relative z-0 flex-1 overflow-auto">
+          {renderDashboardByRole()}
         </div>
       )}
     </main>
   );
 }
+
 
 
