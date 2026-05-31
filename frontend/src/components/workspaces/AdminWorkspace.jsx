@@ -125,7 +125,8 @@ function PersonnelPage({ token }) {
     jobTitle: "",
     tradeCode: "",
     skillLevel: "",
-    specialization: ""
+    specialization: "",
+    baseMonthlySalary: "12000000"
   });
 
   const loadUsers = useCallback(async () => {
@@ -187,6 +188,8 @@ function PersonnelPage({ token }) {
       tradeCode: "",
       skillLevel: "",
       specialization: ""
+      ,
+      baseMonthlySalary: "12000000"
     });
     setIsModalOpen(true);
   };
@@ -208,6 +211,8 @@ function PersonnelPage({ token }) {
       tradeCode: user.trade_code || "",
       skillLevel: user.skill_level || "",
       specialization: user.specialization || ""
+      ,
+      baseMonthlySalary: String(user.base_monthly_salary || "")
     });
     setIsModalOpen(true);
   };
@@ -235,6 +240,8 @@ function PersonnelPage({ token }) {
         tradeCode: modalForm.tradeCode || null,
         skillLevel: modalForm.skillLevel || null,
         specialization: modalForm.specialization || null
+        ,
+        baseMonthlySalary: Number(modalForm.baseMonthlySalary || 0)
       };
 
       if (isEditing) {
@@ -323,6 +330,7 @@ function PersonnelPage({ token }) {
                 <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Trade Code (e.g. STEEL)" value={modalForm.tradeCode} onChange={(e) => setModalForm((p) => ({ ...p, tradeCode: e.target.value.toUpperCase() }))} />
                 <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Skill Level (e.g. Senior)" value={modalForm.skillLevel} onChange={(e) => setModalForm((p) => ({ ...p, skillLevel: e.target.value }))} />
                 <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Specialization (optional)" value={modalForm.specialization} onChange={(e) => setModalForm((p) => ({ ...p, specialization: e.target.value }))} />
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" type="number" min="0" step="1000" placeholder="Base Monthly Salary (VND)" value={modalForm.baseMonthlySalary} onChange={(e) => setModalForm((p) => ({ ...p, baseMonthlySalary: e.target.value }))} />
                 <div className="md:col-span-2">
                   <label className="mb-1 block text-xs text-graphite/70">Employment Status</label>
                   <select className="w-full rounded-lg border border-steel/20 px-4 py-2.5 text-sm" value={modalForm.employmentStatus} onChange={(e) => setModalForm((p) => ({ ...p, employmentStatus: e.target.value }))}>
@@ -367,6 +375,7 @@ function PersonnelPage({ token }) {
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Trade Code:</span> {viewUser.trade_code || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Skill Level:</span> {viewUser.skill_level || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Specialization:</span> {viewUser.specialization || "-"}</div>
+              <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Base Monthly Salary:</span> {formatCurrencyVnd(viewUser.base_monthly_salary || 0)}</div>
               <div className="rounded-lg bg-slate-50 p-3"><span className="font-semibold">Birth Date:</span> {formatDateDMY(viewUser.birth_date) || "-"}</div>
               <div className="rounded-lg bg-slate-50 p-3 md:col-span-2"><span className="font-semibold">Address:</span> {viewUser.address || "-"}</div>
             </div>
@@ -447,6 +456,8 @@ function AttendanceManagementPage({ token }) {
   const [historySearchTerm, setHistorySearchTerm] = useState("");
   const [faceSearchTerm, setFaceSearchTerm] = useState("");
   const [faceFilter, setFaceFilter] = useState("ALL");
+  const [reviewingFaceRow, setReviewingFaceRow] = useState(null);
+  const [rejectReason, setRejectReason] = useState("Image blurred");
   const [editingHistoryRow, setEditingHistoryRow] = useState(null);
   const [historyEditForm, setHistoryEditForm] = useState({
     projectId: "",
@@ -454,7 +465,7 @@ function AttendanceManagementPage({ token }) {
     checkOutTime: "",
     status: "CHECKED_IN"
   });
-  const [timesheetQuickFilter, setTimesheetQuickFilter] = useState("ALL");
+  const [historyQuickFilter, setHistoryQuickFilter] = useState("ALL");
 
   const loadFaceRows = useCallback(async () => {
     try {
@@ -494,93 +505,63 @@ function AttendanceManagementPage({ token }) {
   }, [loadFaceRows, loadProjects]);
 
   useEffect(() => {
-    if (activeTab === "history" || activeTab === "timesheet") {
+    if (activeTab === "history") {
       loadAttendanceHistory(selectedProjectId, selectedDate);
     }
   }, [activeTab, selectedProjectId, selectedDate, loadAttendanceHistory]);
 
-  const timesheetRows = useMemo(() => {
+  const filteredHistoryRows = useMemo(() => {
     const parseDate = (value) => (value ? new Date(value) : null);
     const hourDiff = (start, end) => (end.getTime() - start.getTime()) / (1000 * 60 * 60);
-    const baseRows = historyRows.filter((row) => {
-      if (selectedProjectId && String(row.project_id || "") !== String(selectedProjectId)) {
-        return false;
-      }
-      if (selectedDate) {
-        const checkInDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : "";
-        if (checkInDate !== selectedDate) {
-          return false;
+    const rows = historyRows
+      .map((row) => {
+        const checkIn = parseDate(row.check_in_time);
+        const checkOut = parseDate(row.check_out_time);
+        const timesheetWorkingDayValue = Number(row.timesheet_working_day_value);
+        const timesheetOtHours = Number(row.timesheet_ot_hours);
+        const timesheetStatus = String(row.timesheet_status || "").toUpperCase();
+        let actualHours = 0;
+        let workdayValue = 0;
+        let otHours = 0;
+        let statusText = String(row.attendance_status || "").toUpperCase();
+
+        if (checkIn && checkOut && checkOut > checkIn) {
+          let worked = hourDiff(checkIn, checkOut);
+          const lunchStart = new Date(checkIn);
+          lunchStart.setHours(12, 0, 0, 0);
+          const lunchEnd = new Date(checkIn);
+          lunchEnd.setHours(13, 0, 0, 0);
+          const overlapStart = Math.max(checkIn.getTime(), lunchStart.getTime());
+          const overlapEnd = Math.min(checkOut.getTime(), lunchEnd.getTime());
+          if (overlapEnd > overlapStart) {
+            worked -= (overlapEnd - overlapStart) / (1000 * 60 * 60);
+          }
+          actualHours = Math.max(0, Number(worked.toFixed(2)));
+          workdayValue = actualHours >= 8 ? 1 : actualHours >= 4 ? 0.5 : 0;
+          otHours = 0;
+        } else if (checkIn && !checkOut) {
+          statusText = "MISSING_OUT";
+          workdayValue = 0;
         }
-      }
-      const keyword = historySearchTerm.trim().toLowerCase();
-      if (!keyword) {
-        return true;
-      }
-      const haystack = [row.full_name, row.employee_code, row.project_name]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(keyword);
-    });
 
-    return baseRows.map((row) => {
-      const checkIn = parseDate(row.check_in_time);
-      const checkOut = parseDate(row.check_out_time);
-      let actualHours = 0;
-      let workdayValue = 0;
-      let otHours = 0;
-      let statusText = String(row.attendance_status || "").toUpperCase();
-
-      if (checkIn && checkOut && checkOut > checkIn) {
-        let worked = hourDiff(checkIn, checkOut);
-        const lunchStart = new Date(checkIn);
-        lunchStart.setHours(12, 0, 0, 0);
-        const lunchEnd = new Date(checkIn);
-        lunchEnd.setHours(13, 0, 0, 0);
-        const overlapStart = Math.max(checkIn.getTime(), lunchStart.getTime());
-        const overlapEnd = Math.min(checkOut.getTime(), lunchEnd.getTime());
-        if (overlapEnd > overlapStart) {
-          worked -= (overlapEnd - overlapStart) / (1000 * 60 * 60);
+        if (Number.isFinite(timesheetWorkingDayValue)) {
+          workdayValue = timesheetWorkingDayValue;
         }
-        actualHours = Math.max(0, Number(worked.toFixed(2)));
-        workdayValue = actualHours >= 8 ? 1 : actualHours >= 4 ? 0.5 : 0;
-        const otThreshold = new Date(checkIn);
-        otThreshold.setHours(17, 0, 0, 0);
-        if (checkOut > otThreshold) {
-          otHours = Number(((checkOut.getTime() - otThreshold.getTime()) / (1000 * 60 * 60)).toFixed(2));
+        if (Number.isFinite(timesheetOtHours)) {
+          otHours = timesheetOtHours;
         }
-      } else if (checkIn && !checkOut) {
-        statusText = "MISSING_OUT";
-        workdayValue = 0;
-      }
+        if (timesheetStatus) {
+          statusText = timesheetStatus;
+        }
 
-      return {
-        id: row.id,
-        employee_code: row.employee_code || "-",
-        full_name: row.full_name || "-",
-        project_name: row.project_name || "-",
-        check_in_time: row.check_in_time,
-        check_out_time: row.check_out_time,
-        actual_hours: actualHours,
-        workday_value: workdayValue,
-        ot_hours: otHours,
-        status: statusText || (checkOut ? "COMPLETED" : "OPEN")
-      };
-    });
-  }, [historyRows, selectedProjectId, selectedDate, historySearchTerm]);
-
-  const filteredTimesheetRows = useMemo(() => {
-    if (timesheetQuickFilter === "MISSING_OUT") {
-      return timesheetRows.filter((row) => row.status === "MISSING_OUT");
-    }
-    if (timesheetQuickFilter === "OT_ONLY") {
-      return timesheetRows.filter((row) => Number(row.ot_hours || 0) > 0);
-    }
-    return timesheetRows;
-  }, [timesheetRows, timesheetQuickFilter]);
-
-  const filteredHistoryRows = useMemo(() => {
-    const rows = historyRows.filter((row) => {
+        return {
+          ...row,
+          workday_value: workdayValue,
+          ot_hours: otHours,
+          derived_status: statusText || (checkOut ? "COMPLETED" : "OPEN")
+        };
+      })
+      .filter((row) => {
       if (selectedProjectId && String(row.project_id || "") !== String(selectedProjectId)) {
         return false;
       }
@@ -600,6 +581,12 @@ function AttendanceManagementPage({ token }) {
           return false;
         }
       }
+      if (historyQuickFilter === "MISSING_OUT" && row.derived_status !== "MISSING_OUT") {
+        return false;
+      }
+      if (historyQuickFilter === "OT_ONLY" && Number(row.ot_hours || 0) <= 0) {
+        return false;
+      }
       return true;
     });
     rows.sort((a, b) => {
@@ -611,7 +598,16 @@ function AttendanceManagementPage({ token }) {
       return new Date(b.check_in_time || 0).getTime() - new Date(a.check_in_time || 0).getTime();
     });
     return rows;
-  }, [historyRows, selectedProjectId, selectedDate, historySearchTerm]);
+  }, [historyRows, selectedProjectId, selectedDate, historySearchTerm, historyQuickFilter]);
+
+  const showProjectColumn = useMemo(() => {
+    const names = new Set(
+      filteredHistoryRows
+        .map((row) => String(row.project_name || "").trim())
+        .filter(Boolean)
+    );
+    return names.size > 1;
+  }, [filteredHistoryRows]);
 
   const openEditHistoryModal = (row) => {
     setEditingHistoryRow(row);
@@ -665,16 +661,78 @@ function AttendanceManagementPage({ token }) {
   };
 
   const reviewFaceEnrollment = async (userId, decision) => {
+    const note = decision === "REJECTED" ? rejectReason : "Face matched with profile image";
     try {
       await apiRequest(`/users/${userId}/face-enrollment/review`, token, {
         method: "PUT",
-        body: { decision },
+        body: { decision, note },
         successMessage: `Face enrollment ${String(decision).toLowerCase()}`
       });
+      setReviewingFaceRow(null);
+      setRejectReason("Image blurred");
       await loadFaceRows();
     } catch (error) {
       setStatus(`Face enrollment review failed: ${error.message}`);
     }
+  };
+
+  const resolveEnrollmentImage = (row) => {
+    const template = row?.face_template;
+    if (!template) return "";
+    const parsed = typeof template === "string" ? (() => {
+      try { return JSON.parse(template); } catch { return null; }
+    })() : template;
+    if (!parsed || typeof parsed !== "object") return "";
+    const extractImageFromValue = (value) => {
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      if (typeof value === "object") {
+        return String(value.url || value.imageData || value.dataUrl || value.base64 || value.src || "");
+      }
+      return "";
+    };
+
+    const candidateKeys = ["front", "center", "straight", "primary", "up", "left", "right", "down"];
+
+    const sampleUrls = parsed.sampleUrls && typeof parsed.sampleUrls === "object" ? parsed.sampleUrls : null;
+    if (sampleUrls) {
+      for (const key of candidateKeys) {
+        const url = extractImageFromValue(sampleUrls[key]);
+        if (url) return url;
+      }
+      for (const value of Object.values(sampleUrls)) {
+        const url = extractImageFromValue(value);
+        if (url) return url;
+      }
+    }
+
+    const samples = parsed.samples;
+    if (Array.isArray(samples)) {
+      const byPreferredAngle = samples.find((sample) => {
+        const angle = String(sample?.angle || sample?.key || sample?.name || "").toLowerCase();
+        return angle === "front" || angle === "center" || angle === "straight" || angle === "primary";
+      });
+      const preferredUrl = extractImageFromValue(byPreferredAngle);
+      if (preferredUrl) return preferredUrl;
+
+      const firstSample = samples.find((sample) => extractImageFromValue(sample));
+      return extractImageFromValue(firstSample);
+    }
+
+    if (samples && typeof samples === "object") {
+      for (const key of candidateKeys) {
+        const url = extractImageFromValue(samples[key]);
+        if (url) return url;
+      }
+      for (const value of Object.values(samples)) {
+        const url = extractImageFromValue(value);
+        if (url) return url;
+      }
+    }
+
+    const directFront = extractImageFromValue(parsed.front || parsed.primarySample || parsed.primaryImage);
+    if (directFront) return directFront;
+    return "";
   };
 
   return (
@@ -689,9 +747,6 @@ function AttendanceManagementPage({ token }) {
           </button>
           <button type="button" onClick={() => setActiveTab("history")} className={`rounded-lg px-4 py-2 text-sm font-semibold ${activeTab === "history" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>
             Attendance History
-          </button>
-          <button type="button" onClick={() => setActiveTab("timesheet")} className={`rounded-lg px-4 py-2 text-sm font-semibold ${activeTab === "timesheet" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>
-            Daily Timesheet Board
           </button>
         </div>
       </div>
@@ -765,10 +820,7 @@ function AttendanceManagementPage({ token }) {
                   </td>
                   <td className="p-3 space-x-1">
                     {row.face_enrollment_status === "PENDING" && (
-                      <>
-                        <button type="button" onClick={() => reviewFaceEnrollment(row.id, "APPROVED")} className="rounded-lg bg-emerald-100 hover:bg-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700">Approve</button>
-                        <button type="button" onClick={() => reviewFaceEnrollment(row.id, "REJECTED")} className="rounded-lg bg-rose-100 hover:bg-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700">Reject</button>
-                      </>
+                      <button type="button" onClick={() => setReviewingFaceRow(row)} className="rounded-lg bg-blue-100 hover:bg-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700">Review</button>
                     )}
                     <button type="button" onClick={() => resetFaceTemplate(row.id)} className="rounded-lg bg-indigo-100 hover:bg-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-700">Reset</button>
                   </td>
@@ -776,6 +828,65 @@ function AttendanceManagementPage({ token }) {
               ))}
             </tbody>
           </table>
+
+          {reviewingFaceRow && (
+            <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+              <div className="w-full max-w-5xl rounded-2xl bg-white p-6 shadow-2xl">
+                <div className="mb-4 flex items-center justify-between">
+                  <h5 className="text-lg font-bold text-steel">Face Review</h5>
+                  <ModalCloseButton onClick={() => setReviewingFaceRow(null)} />
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-steel/15 bg-slate-50 p-4">
+                    <p className="mb-2 text-sm font-semibold text-steel">Profile / ID Photo</p>
+                    <img
+                      src={resolveProfileImage(reviewingFaceRow) || "https://placehold.co/640x420?text=No+Profile+Image"}
+                      alt="Profile reference"
+                      className="h-72 w-full rounded-lg border border-steel/15 object-cover"
+                    />
+                  </div>
+                  <div className="rounded-xl border border-steel/15 bg-slate-50 p-4">
+                    <p className="mb-2 text-sm font-semibold text-steel">New Face ID Enrollment</p>
+                    <img
+                      src={resolveEnrollmentImage(reviewingFaceRow) || "https://placehold.co/640x420?text=No+Enrollment+Image"}
+                      alt="Enrollment sample"
+                      className="h-72 w-full rounded-lg border border-steel/15 object-cover"
+                    />
+                    <p className="mt-2 text-xs text-graphite/70">
+                      Submitted at: {reviewingFaceRow.face_enrollment_submitted_at ? new Date(reviewingFaceRow.face_enrollment_submitted_at).toLocaleString() : "-"}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-steel/15 bg-white p-4">
+                  <label className="mb-1 block text-xs font-semibold text-graphite/70">Reject reason (used for employee notification)</label>
+                  <select
+                    className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm"
+                    value={rejectReason}
+                    onChange={(e) => setRejectReason(e.target.value)}
+                  >
+                    <option value="Image blurred">Image blurred</option>
+                    <option value="Wearing mask">Wearing mask</option>
+                    <option value="Wrong person">Wrong person</option>
+                    <option value="Lighting issue">Lighting issue</option>
+                  </select>
+                </div>
+
+                <div className="mt-5 flex justify-end gap-2">
+                  <button type="button" onClick={() => setReviewingFaceRow(null)} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={() => reviewFaceEnrollment(reviewingFaceRow.id, "REJECTED")} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700">
+                    Reject
+                  </button>
+                  <button type="button" onClick={() => reviewFaceEnrollment(reviewingFaceRow.id, "APPROVED")} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+                    Approve
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -802,6 +913,15 @@ function AttendanceManagementPage({ token }) {
                 value={selectedDate}
                 onChange={(e) => setSelectedDate(e.target.value)}
               />
+              <select
+                className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-3"
+                value={historyQuickFilter}
+                onChange={(e) => setHistoryQuickFilter(e.target.value)}
+              >
+                <option value="ALL">Status: All</option>
+                <option value="MISSING_OUT">Status: MISSING_OUT</option>
+                <option value="OT_ONLY">Status: OT Only</option>
+              </select>
             </div>
           </div>
           <table className="min-w-full text-left text-sm">
@@ -809,9 +929,11 @@ function AttendanceManagementPage({ token }) {
               <tr className="border-b-2 border-steel/20 bg-steel/5">
                 <th className="p-3">STT</th>
                 <th className="p-3">Employee</th>
-                <th className="p-3">Project</th>
+                {showProjectColumn && <th className="p-3">Project</th>}
                 <th className="p-3">Check In</th>
                 <th className="p-3">Check Out</th>
+                <th className="p-3">Workday Value</th>
+                <th className="p-3">OT Hours</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">Action</th>
               </tr>
@@ -821,11 +943,15 @@ function AttendanceManagementPage({ token }) {
                 <tr key={row.id} className="border-b border-steel/10">
                   <td className="p-3">{index + 1}</td>
                   <td className="p-3">{row.full_name || "-"}</td>
-                  <td className="p-3">{row.project_name || "-"}</td>
+                  {showProjectColumn && <td className="p-3">{row.project_name || "-"}</td>}
                   <td className="p-3">{row.check_in_time ? new Date(row.check_in_time).toLocaleString() : "-"}</td>
                   <td className="p-3">{row.check_out_time ? new Date(row.check_out_time).toLocaleString() : "-"}</td>
+                  <td className="p-3">{Number(row.workday_value || 0).toFixed(1)}</td>
+                  <td className="p-3">{Number(row.ot_hours || 0).toFixed(2)}</td>
                   <td className="p-3">
-                    {row.check_out_time ? (
+                    {row.derived_status === "MISSING_OUT" ? (
+                      <span className="inline-flex rounded-full border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">MISSING_OUT</span>
+                    ) : row.check_out_time ? (
                       <span className="inline-flex rounded-full border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">CHECKED_OUT</span>
                     ) : (
                       <span className="inline-flex rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">CHECKED_IN</span>
@@ -844,7 +970,7 @@ function AttendanceManagementPage({ token }) {
               ))}
               {filteredHistoryRows.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="p-4 text-center text-graphite/60">No attendance records match the selected filters.</td>
+                  <td colSpan={showProjectColumn ? 9 : 8} className="p-4 text-center text-graphite/60">No attendance records match the selected filters.</td>
                 </tr>
               )}
             </tbody>
@@ -925,57 +1051,6 @@ function AttendanceManagementPage({ token }) {
         </section>
       )}
 
-      {activeTab === "timesheet" && (
-        <section className="overflow-x-auto rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-base font-bold text-steel">Daily Timesheet Board</h4>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={() => setTimesheetQuickFilter("ALL")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "ALL" ? "bg-steel text-white" : "bg-steel/10 text-steel"}`}>All</button>
-              <button type="button" onClick={() => setTimesheetQuickFilter("MISSING_OUT")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "MISSING_OUT" ? "bg-rose-600 text-white" : "bg-rose-100 text-rose-700"}`}>MISSING_OUT</button>
-              <button type="button" onClick={() => setTimesheetQuickFilter("OT_ONLY")} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${timesheetQuickFilter === "OT_ONLY" ? "bg-amber-600 text-white" : "bg-amber-100 text-amber-700"}`}>OT Only</button>
-            </div>
-          </div>
-          <table className="min-w-full text-left text-sm">
-            <thead>
-              <tr className="border-b-2 border-steel/20 bg-steel/5">
-                <th className="p-3">Mã NV</th>
-                <th className="p-3">Tên</th>
-                <th className="p-3">Project</th>
-                <th className="p-3">Giờ Vào</th>
-                <th className="p-3">Giờ Ra</th>
-                <th className="p-3">Giờ thực tế</th>
-                <th className="p-3">Hệ số công</th>
-                <th className="p-3">OT</th>
-                <th className="p-3">Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTimesheetRows.map((row) => (
-                <tr key={row.id} className="border-b border-steel/10">
-                  <td className="p-3">{row.employee_code}</td>
-                  <td className="p-3">{row.full_name}</td>
-                  <td className="p-3">{row.project_name}</td>
-                  <td className="p-3">{row.check_in_time ? new Date(row.check_in_time).toLocaleString() : "-"}</td>
-                  <td className="p-3">{row.check_out_time ? new Date(row.check_out_time).toLocaleString() : "-"}</td>
-                  <td className="p-3">{Number(row.actual_hours || 0).toFixed(2)}</td>
-                  <td className="p-3">{Number(row.workday_value || 0).toFixed(1)}</td>
-                  <td className="p-3">{Number(row.ot_hours || 0).toFixed(2)}</td>
-                  <td className="p-3">
-                    <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${row.status === "MISSING_OUT" ? "bg-rose-100 text-rose-700" : Number(row.ot_hours || 0) > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                      {row.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-              {filteredTimesheetRows.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="p-4 text-center text-graphite/60">No timesheet rows for selected filters.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </section>
-      )}
     </section>
   );
 }
@@ -987,20 +1062,20 @@ function SalaryManagementPage({ token }) {
   const [year, setYear] = useState(String(now.getFullYear()));
   const [holidayMode, setHolidayMode] = useState("exclude");
   const [keyword, setKeyword] = useState("");
-  const [standardHours, setStandardHours] = useState("208");
-  const [hourlyRate, setHourlyRate] = useState("35000");
-  const [overtimeMultiplier, setOvertimeMultiplier] = useState("1.5");
+  const [standardHours] = useState("208");
+  const [overtimeMultiplier] = useState("1.5");
   const [rows, setRows] = useState([]);
-  const [holidays, setHolidays] = useState([]);
-  const [holidayFilterFrom, setHolidayFilterFrom] = useState(`${now.getFullYear()}-01-01`);
-  const [holidayFilterTo, setHolidayFilterTo] = useState(`${now.getFullYear()}-12-31`);
-  const [holidayFilterStatus, setHolidayFilterStatus] = useState("all");
-  const [holidayForm, setHolidayForm] = useState({
-    id: null,
-    holidayDate: "",
-    holidayName: "",
-    multiplier: "1",
-    isActive: true
+  const [selectedPeriod, setSelectedPeriod] = useState(() => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
+  const [selectedAdjustment, setSelectedAdjustment] = useState(null);
+  const [selectedPayslipPreview, setSelectedPayslipPreview] = useState(null);
+  const [adjustmentTab, setAdjustmentTab] = useState("allowances");
+  const [adjustmentForm, setAdjustmentForm] = useState({
+    lunchAllowance: "0",
+    transportAllowance: "0",
+    progressBonus: "0",
+    autoLatePenalty: "0",
+    safetyPenalty: "0",
+    advanceDeduction: "0"
   });
 
   const loadSalaryManagement = useCallback(async () => {
@@ -1020,41 +1095,19 @@ function SalaryManagementPage({ token }) {
     }
   }, [token, month, year, keyword, holidayMode]);
 
-  const loadHolidays = useCallback(async () => {
-    try {
-      const query = new URLSearchParams();
-      if (holidayFilterFrom) {
-        query.set("from", holidayFilterFrom);
-      }
-      if (holidayFilterTo) {
-        query.set("to", holidayFilterTo);
-      }
-      if (holidayFilterStatus === "active") {
-        query.set("isActive", "true");
-      }
-      if (holidayFilterStatus === "inactive") {
-        query.set("isActive", "false");
-      }
-
-      const queryText = query.toString();
-      const data = await apiRequest(`/users/holidays${queryText ? `?${queryText}` : ""}`, token);
-      setHolidays(Array.isArray(data) ? data : []);
-    } catch (error) {
-      setStatus(`Failed to load holidays: ${error.message}`);
-    }
-  }, [token, holidayFilterFrom, holidayFilterTo, holidayFilterStatus]);
-
-  useEffect(() => {
-    setHolidayFilterFrom(`${year}-01-01`);
-    setHolidayFilterTo(`${year}-12-31`);
-  }, [year]);
-
   useEffect(() => {
     loadSalaryManagement();
-    loadHolidays();
-  }, [loadSalaryManagement, loadHolidays]);
+  }, [loadSalaryManagement]);
 
-  const runSalaryCalculation = async (persist) => {
+  useEffect(() => {
+    const [periodYear, periodMonth] = String(selectedPeriod || "").split("-");
+    if (periodYear && periodMonth) {
+      setYear(String(Number(periodYear)));
+      setMonth(String(Number(periodMonth)));
+    }
+  }, [selectedPeriod]);
+
+  const aggregateSalaryData = async () => {
     try {
       await apiRequest("/users/salary/calculate", token, {
         method: "POST",
@@ -1062,88 +1115,75 @@ function SalaryManagementPage({ token }) {
           month: Number(month),
           year: Number(year),
           standardHours: Number(standardHours),
-          hourlyRate: Number(hourlyRate),
           overtimeMultiplier: Number(overtimeMultiplier),
           holidayMode,
-          dryRun: !persist
+          dryRun: false
         },
-        successMessage: persist ? "Salary calculated and saved" : "Salary preview recalculated"
+        successMessage: "Salary data aggregated"
       });
       await loadSalaryManagement();
     } catch (error) {
-      setStatus(`Salary calculation failed: ${error.message}`);
+      setStatus(`Salary aggregation failed: ${error.message}`);
     }
   };
 
-  const submitHolidayForm = async () => {
-    if (!holidayForm.holidayDate || !holidayForm.holidayName.trim()) {
-      setStatus("Holiday date and name are required");
-      return;
-    }
-
-    const payload = {
-      holidayDate: holidayForm.holidayDate,
-      holidayName: holidayForm.holidayName.trim(),
-      multiplier: Number(holidayForm.multiplier || 1),
-      isActive: Boolean(holidayForm.isActive)
-    };
-
-    if (!Number.isFinite(payload.multiplier) || payload.multiplier <= 0) {
-      setStatus("Holiday multiplier must be a positive number");
-      return;
-    }
-
+  const finalizePayroll = async () => {
     try {
-      if (holidayForm.id) {
-        await apiRequest(`/users/holidays/${holidayForm.id}`, token, {
-          method: "PUT",
-          body: payload,
-          successMessage: "Holiday updated"
-        });
-      } else {
-        await apiRequest("/users/holidays", token, {
-          method: "POST",
-          body: payload,
-          successMessage: "Holiday created"
-        });
-      }
-
-      setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true });
-      await loadHolidays();
+      await apiRequest("/users/salary/finalize", token, {
+        method: "POST",
+        body: {
+          month: Number(month),
+          year: Number(year)
+        },
+        successMessage: "Payroll finalized"
+      });
       await loadSalaryManagement();
     } catch (error) {
-      setStatus(`Failed to save holiday: ${error.message}`);
+      setStatus(`Payroll finalization failed: ${error.message}`);
     }
   };
 
-  const editHoliday = (holiday) => {
-    setHolidayForm({
-      id: holiday.id,
-      holidayDate: toDateOnlyValue(holiday.holiday_date),
-      holidayName: String(holiday.holiday_name || ""),
-      multiplier: String(holiday.multiplier ?? 1),
-      isActive: Boolean(holiday.is_active)
+  const saveAdjustments = async () => {
+    if (!selectedAdjustment) return;
+    if (["LOCKED", "PAID"].includes(String(selectedAdjustment.status || "").toUpperCase())) {
+      setStatus("Payroll already finalized/locked. Adjustment is disabled.");
+      return;
+    }
+    try {
+      await apiRequest(`/users/salary/manage/${selectedAdjustment.user_id}/adjustments`, token, {
+        method: "PUT",
+        body: {
+          month: Number(month),
+          year: Number(year),
+          lunchAllowance: Number(adjustmentForm.lunchAllowance || 0),
+          transportAllowance: Number(adjustmentForm.transportAllowance || 0),
+          progressBonus: Number(adjustmentForm.progressBonus || 0),
+          autoLatePenalty: Number(adjustmentForm.autoLatePenalty || 0),
+          safetyPenalty: Number(adjustmentForm.safetyPenalty || 0),
+          advanceDeduction: Number(adjustmentForm.advanceDeduction || 0)
+        },
+        successMessage: "Salary adjustment saved"
+      });
+      setSelectedAdjustment(null);
+      await loadSalaryManagement();
+    } catch (error) {
+      setStatus(`Failed to save adjustment: ${error.message}`);
+    }
+  };
+
+  const openAdjustmentModal = (row, tabMode = "allowances") => {
+    const notes = String(row.notes || "");
+    const payload = notes.startsWith("ADJUSTMENT_BREAKDOWN:") ? JSON.parse(notes.slice("ADJUSTMENT_BREAKDOWN:".length)) : {};
+    setSelectedAdjustment(row);
+    setAdjustmentTab(tabMode);
+    setAdjustmentForm({
+      lunchAllowance: String(payload.lunchAllowance ?? 0),
+      transportAllowance: String(payload.transportAllowance ?? 0),
+      progressBonus: String(payload.progressBonus ?? Number(row.bonus || 0)),
+      autoLatePenalty: String(payload.autoLatePenalty ?? Number(row.late_count || 0) * 50000),
+      safetyPenalty: String(payload.safetyPenalty ?? 0),
+      advanceDeduction: String(payload.advanceDeduction ?? Math.max(0, Number(row.deductions || 0) - (Number(payload.autoLatePenalty ?? Number(row.late_count || 0) * 50000) + Number(payload.safetyPenalty ?? 0))))
     });
-  };
-
-  const removeHoliday = async (holiday) => {
-    if (!window.confirm(`Delete holiday ${holiday.holiday_name} (${toDateOnlyValue(holiday.holiday_date)})?`)) {
-      return;
-    }
-
-    try {
-      await apiRequest(`/users/holidays/${holiday.id}`, token, {
-        method: "DELETE",
-        successMessage: "Holiday deleted"
-      });
-      if (holidayForm.id === holiday.id) {
-        setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true });
-      }
-      await loadHolidays();
-      await loadSalaryManagement();
-    } catch (error) {
-      setStatus(`Failed to delete holiday: ${error.message}`);
-    }
   };
 
   const exportSalaryExcel = () => {
@@ -1153,9 +1193,9 @@ function SalaryManagementPage({ token }) {
         { key: "stt", label: "STT" },
         { key: "employee_code", label: "Employee Code" },
         { key: "full_name", label: "Employee Name" },
-        { key: "email", label: "Email" },
-        { key: "worked_hours", label: "Worked Hours" },
-        { key: "base_salary", label: "Base Salary" },
+        { key: "worked_days", label: "Worked Days" },
+        { key: "contract_salary", label: "Contract Salary" },
+        { key: "earned_pay", label: "Earned Pay" },
         { key: "overtime_hours", label: "Overtime Hours" },
         { key: "total_salary", label: "Total Salary" },
         { key: "status", label: "Status" }
@@ -1164,9 +1204,9 @@ function SalaryManagementPage({ token }) {
         stt: index + 1,
         employee_code: formatEmployeeCode(row.employee_code),
         full_name: row.full_name || "",
-        email: row.email || "",
-        worked_hours: row.worked_hours ?? 0,
-        base_salary: row.base_salary ?? 0,
+        worked_days: row.worked_days ?? ((Number(row.worked_hours) || 0) / 8),
+        contract_salary: row.base_monthly_salary ?? 0,
+        earned_pay: row.base_salary ?? 0,
         overtime_hours: row.overtime_hours ?? 0,
         total_salary: row.total_salary ?? 0,
         status: row.status || "NOT_CALCULATED"
@@ -1180,179 +1220,33 @@ function SalaryManagementPage({ token }) {
       <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="text-lg font-bold text-steel">Salary Management</h3>
-          <button type="button" onClick={exportSalaryExcel} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">
-            Export Excel (CSV)
-          </button>
         </div>
 
-        <div className="grid gap-2 md:grid-cols-6">
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="1" max="12" value={month} onChange={(e) => setMonth(e.target.value)} placeholder="Month" />
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="2000" max="2100" value={year} onChange={(e) => setYear(e.target.value)} placeholder="Year" />
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Search employee" />
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="1" value={standardHours} onChange={(e) => setStandardHours(e.target.value)} placeholder="Standard hours" />
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="1" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)} placeholder="Hourly rate" />
-          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="1" step="0.1" value={overtimeMultiplier} onChange={(e) => setOvertimeMultiplier(e.target.value)} placeholder="OT multiplier" />
-        </div>
-
-        <div className="mt-2 grid gap-2 md:grid-cols-3">
-          <label className="grid gap-1 text-sm text-graphite">
-            Holiday policy
-            <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={holidayMode} onChange={(e) => setHolidayMode(e.target.value)}>
-              <option value="exclude">Exclude holiday hours</option>
-              <option value="multiplier">Apply holiday multiplier</option>
+        <div className="grid gap-2 md:grid-cols-[260px_1fr_auto_auto_auto] md:items-end">
+          <label className="grid gap-1 text-xs font-semibold text-graphite/80">
+            Payroll Period
+            <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedPeriod} onChange={(e) => setSelectedPeriod(e.target.value)}>
+              {Array.from({ length: 18 }).map((_, idx) => {
+                const dt = new Date(now.getFullYear(), now.getMonth() - idx, 1);
+                const value = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+                const label = `Month ${String(dt.getMonth() + 1).padStart(2, "0")}/${dt.getFullYear()}`;
+                return <option key={value} value={value}>{label}</option>;
+              })}
             </select>
           </label>
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" onClick={loadSalaryManagement} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
-            Refresh List
-          </button>
-          <button type="button" onClick={() => runSalaryCalculation(false)} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">
-            Preview Calculation
-          </button>
-          <button type="button" onClick={() => runSalaryCalculation(true)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">
-            Calculate & Save Salary
-          </button>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="text-lg font-bold text-steel">Holiday Management (HR)</h3>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={loadHolidays} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
-              Apply Filters
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setHolidayFilterFrom(`${year}-01-01`);
-                setHolidayFilterTo(`${year}-12-31`);
-                setHolidayFilterStatus("all");
-              }}
-              className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold"
-            >
-              Clear Filters
-            </button>
-          </div>
-        </div>
-
-        <div className="mb-3 grid gap-2 md:grid-cols-3">
-          <label className="grid gap-1 text-sm text-graphite">
-            From date
-            <input
-              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-              type="date"
-              value={holidayFilterFrom}
-              onChange={(e) => setHolidayFilterFrom(e.target.value)}
-            />
+          <label className="grid gap-1 text-xs font-semibold text-graphite/80">
+            Search Employee
+            <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Code / name / email" />
           </label>
-          <label className="grid gap-1 text-sm text-graphite">
-            To date
-            <input
-              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-              type="date"
-              value={holidayFilterTo}
-              onChange={(e) => setHolidayFilterTo(e.target.value)}
-            />
-          </label>
-          <label className="grid gap-1 text-sm text-graphite">
-            Status
-            <select
-              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-              value={holidayFilterStatus}
-              onChange={(e) => setHolidayFilterStatus(e.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="active">Active</option>
-              <option value="inactive">Inactive</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="grid gap-2 md:grid-cols-5">
-          <input
-            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-            type="date"
-            value={holidayForm.holidayDate}
-            onChange={(e) => setHolidayForm((prev) => ({ ...prev, holidayDate: e.target.value }))}
-          />
-          <input
-            className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-2"
-            value={holidayForm.holidayName}
-            onChange={(e) => setHolidayForm((prev) => ({ ...prev, holidayName: e.target.value }))}
-            placeholder="Holiday name"
-          />
-          <input
-            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-            type="number"
-            min="0.1"
-            step="0.1"
-            value={holidayForm.multiplier}
-            onChange={(e) => setHolidayForm((prev) => ({ ...prev, multiplier: e.target.value }))}
-            placeholder="Multiplier"
-          />
-          <label className="flex items-center gap-2 rounded-lg border border-steel/20 px-3 py-2 text-sm">
-            <input
-              type="checkbox"
-              checked={holidayForm.isActive}
-              onChange={(e) => setHolidayForm((prev) => ({ ...prev, isActive: e.target.checked }))}
-            />
-            Active
-          </label>
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" onClick={submitHolidayForm} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">
-            {holidayForm.id ? "Update Holiday" : "Create Holiday"}
+          <button type="button" onClick={aggregateSalaryData} className="h-10 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">
+            Aggregate Salary Data
           </button>
-          <button
-            type="button"
-            onClick={() => setHolidayForm({ id: null, holidayDate: "", holidayName: "", multiplier: "1", isActive: true })}
-            className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold"
-          >
-            Clear Form
+          <button type="button" onClick={finalizePayroll} className="h-10 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">
+            Finalize Payroll
           </button>
-        </div>
-
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-steel/15 bg-steel/5">
-                <th className="p-3">Date</th>
-                <th className="p-3">Holiday Name</th>
-                <th className="p-3">Multiplier</th>
-                <th className="p-3">Status</th>
-                <th className="p-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {holidays.map((holiday) => (
-                <tr key={holiday.id} className="border-b border-steel/10">
-                  <td className="p-3">{toDateOnlyValue(holiday.holiday_date)}</td>
-                  <td className="p-3">{holiday.holiday_name}</td>
-                  <td className="p-3">{holiday.multiplier}</td>
-                  <td className="p-3">{holiday.is_active ? "Active" : "Inactive"}</td>
-                  <td className="p-3">
-                    <div className="flex gap-2">
-                      <button type="button" onClick={() => editHoliday(holiday)} className="rounded-lg border border-steel/20 px-2 py-1 text-xs hover:bg-slate-50">
-                        Edit
-                      </button>
-                      <button type="button" onClick={() => removeHoliday(holiday)} className="rounded-lg border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50">
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {holidays.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="p-4 text-center text-graphite/60">No holidays found for selected year.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+          <button type="button" onClick={exportSalaryExcel} className="h-10 rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
+            Export Excel
+          </button>
         </div>
       </section>
 
@@ -1360,30 +1254,61 @@ function SalaryManagementPage({ token }) {
         <table className="min-w-full text-left text-sm">
           <thead>
             <tr className="border-b-2 border-steel/20 bg-steel/5">
-              <th className="p-3">STT</th>
-              <th className="p-3">Employee</th>
               <th className="p-3">Code</th>
-              <th className="p-3">Worked Hours</th>
-              <th className="p-3">Base Salary</th>
+              <th className="p-3">Employee</th>
+              <th className="p-3">Worked Days</th>
+              <th className="p-3">Contract Salary</th>
+              <th className="p-3">Earned Pay</th>
+              <th className="p-3">OT Pay</th>
+              <th className="p-3">Total Allowances</th>
+              <th className="p-3">Total Deductions</th>
               <th className="p-3">OT Hours</th>
               <th className="p-3">Total Salary</th>
               <th className="p-3">Status</th>
+              <th className="p-3">Action</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row, index) => (
               <tr key={row.user_id} className="border-b border-steel/10">
-                <td className="p-3">{index + 1}</td>
-                <td className="p-3">{row.full_name || "-"}</td>
+                {(() => {
+                  const overtimePay = Number(row.overtime_hours || 0) * Number(row.overtime_rate || 0);
+                  return (
+                    <>
                 <td className="p-3">{formatEmployeeCode(row.employee_code)}</td>
-                <td className="p-3">{row.worked_hours ?? 0}</td>
+                <td className="p-3">{row.full_name || "-"}</td>
+                <td className="p-3">{Number(row.worked_days ?? ((Number(row.worked_hours) || 0) / 8)).toFixed(1)}</td>
+                <td className="p-3">{formatCurrencyVnd(row.base_monthly_salary)}</td>
                 <td className="p-3">{formatCurrencyVnd(row.base_salary)}</td>
+                <td className="p-3">{formatCurrencyVnd(overtimePay)}</td>
+                <td className="p-3">
+                  <button
+                    type="button"
+                    className={`underline ${["LOCKED", "PAID"].includes(String(row.status || "").toUpperCase()) ? "cursor-not-allowed text-slate-400 no-underline" : "text-blue-700"}`}
+                    disabled={["LOCKED", "PAID"].includes(String(row.status || "").toUpperCase())}
+                    onClick={() => openAdjustmentModal(row, "allowances")}
+                  >
+                    {formatCurrencyVnd(row.bonus || 0)}
+                  </button>
+                </td>
+                <td className="p-3">
+                  <button
+                    type="button"
+                    className={`underline ${["LOCKED", "PAID"].includes(String(row.status || "").toUpperCase()) ? "cursor-not-allowed text-slate-400 no-underline" : "text-blue-700"}`}
+                    disabled={["LOCKED", "PAID"].includes(String(row.status || "").toUpperCase())}
+                    onClick={() => openAdjustmentModal(row, "deductions")}
+                  >
+                    - {formatCurrencyVnd(row.deductions || 0)}
+                  </button>
+                </td>
                 <td className="p-3">{row.overtime_hours ?? 0}</td>
                 <td className="p-3 font-semibold">{formatCurrencyVnd(row.total_salary)}</td>
                 <td className="p-3">
                   <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${
                     row.status === "PAID"
                       ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                      : row.status === "LOCKED"
+                        ? "border-blue-300 bg-blue-50 text-blue-700"
                       : row.status === "PENDING"
                         ? "border-amber-300 bg-amber-50 text-amber-700"
                         : "border-slate-300 bg-slate-50 text-slate-700"
@@ -1391,16 +1316,103 @@ function SalaryManagementPage({ token }) {
                     {row.status || "NOT_CALCULATED"}
                   </span>
                 </td>
+                <td className="p-3">
+                  <button type="button" className="rounded-lg border border-steel/20 px-2 py-1 text-xs hover:bg-steel/5" onClick={() => setSelectedPayslipPreview(row)}>⚙ Detail</button>
+                </td>
+                    </>
+                  );
+                })()}
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-4 text-center text-graphite/60">No employee salary data for selected month.</td>
+                <td colSpan={12} className="p-4 text-center text-graphite/60">No employee salary data for selected month.</td>
               </tr>
             )}
           </tbody>
         </table>
       </section>
+      {selectedAdjustment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="text-base font-bold text-steel">Income Adjustment - {selectedAdjustment.full_name}</h4>
+              <button type="button" className="text-sm text-graphite hover:text-black" onClick={() => setSelectedAdjustment(null)}>Close</button>
+            </div>
+            <div className="mb-3 inline-flex overflow-hidden rounded-lg border border-steel/20">
+              <button type="button" onClick={() => setAdjustmentTab("allowances")} className={`px-3 py-1.5 text-xs font-semibold ${adjustmentTab === "allowances" ? "bg-emerald-600 text-white" : "bg-white text-graphite"}`}>Allowances</button>
+              <button type="button" onClick={() => setAdjustmentTab("deductions")} className={`px-3 py-1.5 text-xs font-semibold ${adjustmentTab === "deductions" ? "bg-rose-600 text-white" : "bg-white text-graphite"}`}>Deductions & Penalties</button>
+            </div>
+            {adjustmentTab === "allowances" ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80">Lunch Allowance
+                  <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="0" value={adjustmentForm.lunchAllowance} onChange={(e) => setAdjustmentForm((p) => ({ ...p, lunchAllowance: e.target.value }))} />
+                </label>
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80">Transport Allowance
+                  <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="0" value={adjustmentForm.transportAllowance} onChange={(e) => setAdjustmentForm((p) => ({ ...p, transportAllowance: e.target.value }))} />
+                </label>
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80 md:col-span-2">Progress Bonus
+                  <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="0" value={adjustmentForm.progressBonus} onChange={(e) => setAdjustmentForm((p) => ({ ...p, progressBonus: e.target.value }))} />
+                </label>
+              </div>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80">Late Penalty (Auto)
+                  <input className="rounded-lg border border-steel/20 bg-slate-100 px-3 py-2 text-sm" type="number" readOnly value={adjustmentForm.autoLatePenalty} />
+                </label>
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80">Safety Penalty
+                  <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="0" value={adjustmentForm.safetyPenalty} onChange={(e) => setAdjustmentForm((p) => ({ ...p, safetyPenalty: e.target.value }))} />
+                </label>
+                <label className="grid gap-1 text-xs font-semibold text-graphite/80 md:col-span-2">Advance Deduction
+                  <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" min="0" value={adjustmentForm.advanceDeduction} onChange={(e) => setAdjustmentForm((p) => ({ ...p, advanceDeduction: e.target.value }))} />
+                </label>
+              </div>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold" onClick={() => setSelectedAdjustment(null)}>Cancel</button>
+              <button type="button" className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700" onClick={saveAdjustments}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectedPayslipPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="text-base font-bold text-steel">Preview Payslip - {selectedPayslipPreview.full_name}</h4>
+              <button type="button" className="text-sm text-graphite hover:text-black" onClick={() => setSelectedPayslipPreview(null)}>Close</button>
+            </div>
+            {(() => {
+              const otPay = Number(selectedPayslipPreview.overtime_hours || 0) * Number(selectedPayslipPreview.overtime_rate || 0);
+              return (
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-steel/15 bg-gradient-to-r from-emerald-500 to-teal-500 p-4 text-white">
+                    <p className="text-xs uppercase tracking-wide text-white/80">Net Pay</p>
+                    <p className="mt-1 text-2xl font-bold">{formatCurrencyVnd(selectedPayslipPreview.total_salary || 0)}</p>
+                  </div>
+                  <div className="rounded-xl border border-steel/10 p-3">
+                    <p className="mb-2 text-sm font-bold text-emerald-700">Earnings</p>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between"><span>Contract Salary</span><span>{formatCurrencyVnd(selectedPayslipPreview.base_monthly_salary || 0)}</span></div>
+                      <div className="flex justify-between"><span>Earned Pay</span><span>{formatCurrencyVnd(selectedPayslipPreview.base_salary || 0)}</span></div>
+                      <div className="flex justify-between"><span>OT Pay</span><span>{formatCurrencyVnd(otPay)}</span></div>
+                      <div className="flex justify-between"><span>Total Allowances</span><span>{formatCurrencyVnd(selectedPayslipPreview.bonus || 0)}</span></div>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-steel/10 p-3">
+                    <p className="mb-2 text-sm font-bold text-rose-700">Deductions</p>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between"><span>Total Deductions</span><span>- {formatCurrencyVnd(selectedPayslipPreview.deductions || 0)}</span></div>
+                      <div className="flex justify-between"><span>Worked Days</span><span>{Number(selectedPayslipPreview.worked_days ?? 0).toFixed(1)}</span></div>
+                      <div className="flex justify-between"><span>OT Hours</span><span>{Number(selectedPayslipPreview.overtime_hours || 0).toFixed(1)}</span></div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1541,9 +1553,10 @@ export default function AdminWorkspace({ token, profile, onOpenProfileModal, onO
         {activePage === "personnel" && <PersonnelPage token={token} />}
         {activePage === "workforce" && <WorkforceAssignmentPage token={token} />}
         {activePage === "attendance" && <AttendanceManagementPage token={token} />}
-        {activePage === "requests" && <RequestsManagementPage token={token} />}
+        {activePage === "requests" && <RequestsManagementPage token={token} profile={profile} />}
         {activePage === "salary" && <SalaryManagementPage token={token} />}
       </div>
     </section>
   );
 }
+

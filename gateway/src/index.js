@@ -40,6 +40,7 @@ function proxyRoute(path, target) {
 
 proxyRoute("/api/auth", "http://auth-service:3001");
 proxyRoute("/api/users", "http://user-service:3002");
+proxyRoute("/api/salary", "http://user-service:3002");
 proxyRoute("/api/projects", "http://project-service:3003");
 proxyRoute("/api/attendance", "http://attendance-service:3004");
 proxyRoute("/api/requests", "http://request-service:3006");

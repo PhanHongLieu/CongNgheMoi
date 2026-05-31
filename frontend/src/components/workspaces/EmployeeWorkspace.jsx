@@ -1,69 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import AttendancePanel from "../AttendancePanel";
-import SidebarMenu from "../SidebarMenu";
 import RequestsPage from "./EmployeeRequests";
 import { apiRequest } from "../../lib/api";
-import { getTranslation } from "../../i18n";
 
 function AttendancePage({ token, profile, faceEnrollmentStatus }) {
   return <AttendancePanel token={token} profile={profile} faceEnrollmentStatus={faceEnrollmentStatus} />;
 }
 
-function MyProjectPage({ token }) {
-  const [projects, setProjects] = useState([]);
-  const [status, setStatus] = useState("Ready");
-
-  const load = useCallback(async () => {
-    try {
-      const data = await apiRequest("/projects/my", token);
-      setProjects(Array.isArray(data) ? data : []);
-      setStatus("Project list loaded");
-    } catch (error) {
-      setStatus(`Unable to load list project: ${error.message}`);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  return (
-    <section className="space-y-4">
-      {status && status !== "Project list loaded" && status !== "Ready" && (
-        <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
-          <span>{status}</span>
-        </div>
-      )}
-
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {projects.map((project) => (
-          <div key={project.id} className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft hover:shadow-md transition">
-            <div className="flex items-start justify-between mb-3">
-              <div className="rounded-lg bg-blue-50 p-2"></div>
-              <span className="inline-block rounded-full px-3 py-1 text-xs font-semibold" style={{
-                backgroundColor: project.status === 'COMPLETED' ? '#dcfce7' : project.status === 'IN_PROGRESS' ? '#fef3c7' : '#e0e7ff',
-                color: project.status === 'COMPLETED' ? '#166534' : project.status === 'IN_PROGRESS' ? '#92400e' : '#312e81'
-              }}>{project.status}</span>
-            </div>
-            <h3 className="font-bold text-steel mb-1">{project.name}</h3>
-            <p className="text-xs text-graphite/70 font-mono">{project.project_code}</p>
-            {project.address && <p className="text-xs text-graphite/60 mt-2">{project.address}</p>}
-          </div>
-        ))}
-      </div>
-
-      {projects.length === 0 && (
-        <div className="rounded-2xl border border-dashed border-steel/20 bg-white p-12 text-center">
-          <p className="text-graphite/60">No assigned projects yet</p>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function SchedulePage({ token }) {
   const [schedule, setSchedule] = useState([]);
   const [status, setStatus] = useState("Ready");
+  const [viewMode, setViewMode] = useState("WEEK");
+  const [weekAnchor, setWeekAnchor] = useState(() => new Date());
+  const [monthAnchor, setMonthAnchor] = useState(() => new Date());
   const SCHEDULE_CACHE_KEY = "employee_schedule_cache_v1";
 
   const load = useCallback(async () => {
@@ -93,26 +42,87 @@ function SchedulePage({ token }) {
     load();
   }, [load]);
 
-  const groupedWeeks = useMemo(() => {
-    const sorted = [...schedule].sort((a, b) => String(a.work_date || "").localeCompare(String(b.work_date || "")));
-    const map = new Map();
-    for (const item of sorted) {
-      const dateText = String(item.work_date || item.start_date || "");
-      if (!dateText) continue;
-      const dt = new Date(dateText);
-      if (Number.isNaN(dt.getTime())) continue;
-      const weekStart = new Date(dt);
-      const day = weekStart.getDay();
-      const diff = day === 0 ? -6 : 1 - day;
-      weekStart.setDate(weekStart.getDate() + diff);
-      const key = weekStart.toISOString().slice(0, 10);
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(item);
-    }
-    return Array.from(map.entries()).map(([weekStart, items]) => ({ weekStart, items }));
+  const startOfWeek = (value) => {
+    const dt = new Date(value);
+    const day = dt.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    dt.setDate(dt.getDate() + diff);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+  };
+  const endOfWeek = (value) => {
+    const dt = startOfWeek(value);
+    dt.setDate(dt.getDate() + 6);
+    dt.setHours(23, 59, 59, 999);
+    return dt;
+  };
+  const startOfMonth = (value) => {
+    const dt = new Date(value);
+    dt.setDate(1);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+  };
+  const endOfMonth = (value) => {
+    const dt = startOfMonth(value);
+    dt.setMonth(dt.getMonth() + 1);
+    dt.setDate(0);
+    dt.setHours(23, 59, 59, 999);
+    return dt;
+  };
+  const toTimeText = (item) => {
+    const startRaw = item.shift_start_time || item.shiftStartTime || "";
+    const endRaw = item.shift_end_time || item.shiftEndTime || "";
+    const start = String(startRaw).slice(0, 5) || "08:00";
+    const end = String(endRaw).slice(0, 5) || "17:00";
+    return `${start} - ${end}`;
+  };
+  const accentClasses = [
+    "border-l-cyan-500",
+    "border-l-emerald-500",
+    "border-l-violet-500",
+    "border-l-amber-500",
+    "border-l-rose-500"
+  ];
+  const getAccentClass = (item) => {
+    const seed = Number(item.project_id || item.projectId || item.id || 0);
+    return accentClasses[Math.abs(seed) % accentClasses.length];
+  };
+  const today = new Date().toISOString().slice(0, 10);
+
+  const workingSchedule = useMemo(() => {
+    return (Array.isArray(schedule) ? schedule : [])
+      .filter((day) => {
+        const scheduleStatus = String(day.schedule_status || "").toUpperCase();
+        return !["OFF", "DAY_OFF", "LEAVE"].includes(scheduleStatus);
+      })
+      .sort((a, b) => String(a.work_date || "").localeCompare(String(b.work_date || "")));
   }, [schedule]);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const selectedRange = useMemo(() => {
+    if (viewMode === "MONTH") {
+      return {
+        from: startOfMonth(monthAnchor),
+        to: endOfMonth(monthAnchor)
+      };
+    }
+    return {
+      from: startOfWeek(weekAnchor),
+      to: endOfWeek(weekAnchor)
+    };
+  }, [viewMode, weekAnchor, monthAnchor]);
+
+  const filteredSchedule = useMemo(() => {
+    return workingSchedule.filter((item) => {
+      const dateText = String(item.work_date || item.start_date || "");
+      if (!dateText) return false;
+      const dt = new Date(dateText);
+      if (Number.isNaN(dt.getTime())) return false;
+      return dt >= selectedRange.from && dt <= selectedRange.to;
+    });
+  }, [workingSchedule, selectedRange]);
+
+  const weekRangeLabel = `${selectedRange.from.toLocaleDateString("en-GB")} - ${selectedRange.to.toLocaleDateString("en-GB")}`;
+  const monthLabel = `${String(selectedRange.from.getMonth() + 1).padStart(2, "0")} / ${selectedRange.from.getFullYear()}`;
 
   return (
     <section className="space-y-4">
@@ -122,40 +132,72 @@ function SchedulePage({ token }) {
         </div>
       )}
 
-      <div className="space-y-4">
-        {groupedWeeks.map((week) => (
-          <div key={week.weekStart} className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-graphite/60">Week of {new Date(week.weekStart).toLocaleDateString("en-US")}</p>
-            <div className="space-y-2">
-              {week.items.map((item) => {
-                const workDate = String(item.work_date || item.start_date || "");
-                const isToday = workDate === today;
-                const scheduleStatus = String(item.schedule_status || "SCHEDULED").toUpperCase();
-                const label = scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE" ? "Day Off" : "Working";
-                return (
-                  <article key={`${item.id}-${workDate}`} className={`rounded-xl border p-3 ${isToday ? "border-emerald-500 bg-emerald-50" : "border-steel/15 bg-white"}`}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-[108px]">
-                        <p className="text-sm font-bold text-steel">{new Date(workDate).toLocaleDateString("en-US", { weekday: "short" })}</p>
-                        <p className="text-xs text-graphite/70">{new Date(workDate).toLocaleDateString("en-US")}</p>
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-sm font-semibold text-graphite">{item.project_name || "No project"}</p>
-                        <p className="text-xs text-graphite/60">{item.shift_name || item.shift_code || "-"}</p>
-                      </div>
-                      <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${label === "Working" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{label}</span>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="inline-flex overflow-hidden rounded-lg border border-steel/20">
+            <button type="button" onClick={() => setViewMode("WEEK")} className={`px-3 py-1.5 text-xs font-semibold ${viewMode === "WEEK" ? "bg-steel text-white" : "bg-white text-steel"}`}>Week</button>
+            <button type="button" onClick={() => setViewMode("MONTH")} className={`px-3 py-1.5 text-xs font-semibold ${viewMode === "MONTH" ? "bg-steel text-white" : "bg-white text-steel"}`}>Month</button>
           </div>
-        ))}
+          {viewMode === "WEEK" ? (
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setWeekAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() - 7))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&lt;</button>
+              <span className="text-xs font-semibold text-graphite/70">Week: {weekRangeLabel}</span>
+              <button type="button" onClick={() => setWeekAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + 7))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&gt;</button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&lt;</button>
+              <span className="text-xs font-semibold text-graphite/70">Month: {monthLabel}</span>
+              <select
+                className="rounded-lg border border-steel/20 px-2 py-1 text-xs"
+                value={monthAnchor.getMonth()}
+                onChange={(e) => setMonthAnchor((prev) => new Date(prev.getFullYear(), Number(e.target.value), 1))}
+              >
+                {Array.from({ length: 12 }).map((_, idx) => (
+                  <option key={`month-${idx}`} value={idx}>{String(idx + 1).padStart(2, "0")}</option>
+                ))}
+              </select>
+              <select
+                className="rounded-lg border border-steel/20 px-2 py-1 text-xs"
+                value={monthAnchor.getFullYear()}
+                onChange={(e) => setMonthAnchor((prev) => new Date(Number(e.target.value), prev.getMonth(), 1))}
+              >
+                {Array.from({ length: 6 }).map((_, idx) => {
+                  const year = new Date().getFullYear() - 2 + idx;
+                  return <option key={`year-${year}`} value={year}>{year}</option>;
+                })}
+              </select>
+              <button type="button" onClick={() => setMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&gt;</button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {schedule.length === 0 && (
+      <div className="space-y-2">
+        {filteredSchedule.map((item) => {
+          const workDate = String(item.work_date || item.start_date || "");
+          const isToday = workDate === today;
+          return (
+            <article key={`${item.id}-${workDate}`} className={`rounded-xl border border-steel/15 border-l-4 p-3 ${getAccentClass(item)} ${isToday ? "bg-emerald-50" : "bg-white"}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-[108px]">
+                  <p className="text-sm font-bold text-steel">{new Date(workDate).toLocaleDateString("en-US", { weekday: "short" })}</p>
+                  <p className="text-xs text-graphite/70">{new Date(workDate).toLocaleDateString("en-US")}</p>
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-graphite">{item.project_name || "No project"}</p>
+                  {item.address ? <p className="text-xs text-graphite/60">{item.address}</p> : null}
+                  <p className="text-xs text-graphite/60">{toTimeText(item)}</p>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      {filteredSchedule.length === 0 && (
         <div className="rounded-2xl border border-dashed border-steel/20 bg-white p-12 text-center">
-          <p className="text-graphite/60">No scheduled work yet</p>
+          <p className="text-graphite/60">No assigned working shifts in selected time range</p>
         </div>
       )}
     </section>
@@ -163,25 +205,52 @@ function SchedulePage({ token }) {
 }
 
 function SalaryPage({ token }) {
-  const [salaryData, setSalaryData] = useState(null);
-  const [salaryHistory, setSalaryHistory] = useState([]);
+  const [salaryRow, setSalaryRow] = useState(null);
   const [status, setStatus] = useState("Ready");
+  const [monthAnchor, setMonthAnchor] = useState(() => new Date());
+  const [earningsExpanded, setEarningsExpanded] = useState(true);
+  const [deductionsExpanded, setDeductionsExpanded] = useState(true);
+  const money = (value) =>
+    new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(Number(value || 0));
 
   const load = useCallback(async () => {
     try {
-      const data = await apiRequest("/salary/current", token);
-      setSalaryData(data || {});
-      const history = await apiRequest("/salary/history", token);
-      setSalaryHistory(Array.isArray(history) ? history : []);
+      const month = monthAnchor.getMonth() + 1;
+      const year = monthAnchor.getFullYear();
+      const rows = await apiRequest(`/salary?month=${month}&year=${year}`, token);
+      const payload = Array.isArray(rows) ? rows[0] || null : null;
+      setSalaryRow(payload);
       setStatus("Salary data loaded");
     } catch (error) {
-      setStatus(`Unable to load salary information: ${error.message}`);
+      setSalaryRow(null);
+      setStatus(`Unable to load payslip information: ${error.message}`);
     }
-  }, [token]);
+  }, [token, monthAnchor]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const salaryStatus = String(salaryRow?.status || "").toUpperCase();
+  const statusBadge =
+    salaryStatus === "PAID"
+      ? { label: "Paid", className: "bg-emerald-100 text-emerald-700" }
+      : { label: "Calculating", className: "bg-amber-100 text-amber-700" };
+
+  const notesText = String(salaryRow?.notes || "");
+  const workedHoursMatch = notesText.match(/workedHours=([0-9.]+)/i);
+  const workedDaysMatch = notesText.match(/workedDays=([0-9.]+)/i);
+  const overtimeHoursMatch = notesText.match(/overtimeHours=([0-9.]+)/i);
+  const workedHours = Number(workedHoursMatch?.[1] || 0);
+  const workedDays = Number(workedDaysMatch?.[1] || (workedHours > 0 ? workedHours / 8 : 0));
+  const overtimeHours = Number(salaryRow?.overtime_hours ?? overtimeHoursMatch?.[1] ?? 0);
+  const baseMonthlySalary = Number(salaryRow?.base_monthly_salary || 0);
+  const standardWorkingDays = Number(salaryRow?.standard_working_days || 26);
+  const baseDayRate = standardWorkingDays > 0 ? baseMonthlySalary / standardWorkingDays : 0;
+  const overtimeAmount = Number(salaryRow?.overtime_rate || 0) * overtimeHours;
+  const bonus = Number(salaryRow?.bonus || 0);
+  const deductions = Number(salaryRow?.deductions || 0);
+  const netPay = Number(salaryRow?.total_salary || 0);
 
   return (
     <section className="space-y-4">
@@ -191,88 +260,72 @@ function SalaryPage({ token }) {
         </div>
       )}
 
-      {salaryData && (
-        <div className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-          <h3 className="text-lg font-bold text-steel mb-4">Current Salary Information</h3>
-          <div className="grid gap-3 md:grid-cols-2">
-            {salaryData.base_salary && (
-              <div className="flex justify-between">
-                <span className="text-graphite/70">Base Salary:</span>
-                <span className="font-semibold">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salaryData.base_salary)}</span>
-              </div>
-            )}
-            {salaryData.allowances && (
-              <div className="flex justify-between">
-                <span className="text-graphite/70">Allowances:</span>
-                <span className="font-semibold">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salaryData.allowances)}</span>
-              </div>
-            )}
-            {salaryData.total_salary && (
-              <div className="flex justify-between border-t pt-2">
-                <span className="text-graphite/70 font-semibold">Total:</span>
-                <span className="font-bold text-green-700">{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(salaryData.total_salary)}</span>
-              </div>
-            )}
-            {salaryData.payment_date && (
-              <div className="flex justify-between">
-                <span className="text-graphite/70">Payment Date:</span>
-                <span className="font-semibold">{new Date(salaryData.payment_date).toLocaleDateString('en-US')}</span>
-              </div>
-            )}
-            {salaryData.notes && (
-              <div className="mt-3 col-span-2">
-                <span className="text-graphite/70 block mb-1">Note:</span>
-                <p className="text-sm text-graphite bg-gray-50 p-2 rounded">{salaryData.notes}</p>
-              </div>
-            )}
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&lt;</button>
+            <p className="text-sm font-semibold text-steel">
+              Month {String(monthAnchor.getMonth() + 1).padStart(2, "0")}/{monthAnchor.getFullYear()}
+            </p>
+            <button type="button" onClick={() => setMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))} className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel">&gt;</button>
           </div>
+          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadge.className}`}>{statusBadge.label}</span>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-steel/15 bg-gradient-to-r from-emerald-500 to-teal-500 p-5 text-white shadow-soft">
+        <p className="text-xs uppercase tracking-wide text-white/80">Net Pay</p>
+        <p className="mt-1 text-3xl font-bold">{money(netPay)}</p>
+        <p className="mt-1 text-xs text-white/80">Includes allowances and deductions.</p>
+      </div>
+
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <button type="button" onClick={() => setEarningsExpanded((prev) => !prev)} className="flex w-full items-center justify-between text-left">
+          <span className="text-sm font-bold text-emerald-700">Total Earnings</span>
+          <span className="text-xs font-semibold text-graphite/70">{earningsExpanded ? "Hide" : "Show"}</span>
+        </button>
+        {earningsExpanded && (
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="flex items-center justify-between text-graphite">
+              <span>Base Pay</span>
+              <span>{workedDays > 0 ? `${workedDays.toFixed(1)} day x (${money(baseMonthlySalary)} / ${standardWorkingDays}) = ${money(salaryRow?.base_salary || 0)}` : money(salaryRow?.base_salary || 0)}</span>
+            </div>
+            <div className="flex items-center justify-between text-graphite">
+              <span>Overtime</span>
+              <span>{`${overtimeHours.toFixed(1)} h x ${money(salaryRow?.overtime_rate || 0)} = ${money(overtimeAmount)}`}</span>
+            </div>
+            <div className="flex items-center justify-between text-graphite">
+              <span>Allowances / Bonus</span>
+              <span>{money(bonus)}</span>
+            </div>
+            <div className="flex items-center justify-between border-t border-steel/10 pt-2 font-semibold text-emerald-700">
+              <span>Total Earnings</span>
+              <span>{money(Number(salaryRow?.base_salary || 0) + overtimeAmount + bonus)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <button type="button" onClick={() => setDeductionsExpanded((prev) => !prev)} className="flex w-full items-center justify-between text-left">
+          <span className="text-sm font-bold text-rose-700">Deductions</span>
+          <span className="text-xs font-semibold text-graphite/70">{deductionsExpanded ? "Hide" : "Show"}</span>
+        </button>
+        {deductionsExpanded && (
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="flex items-center justify-between text-graphite">
+              <span>Total Deductions</span>
+              <span>- {money(deductions)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!salaryRow && (
+        <div className="rounded-2xl border border-dashed border-steel/20 bg-white p-10 text-center">
+          <p className="text-sm text-graphite/70">No payslip for selected month.</p>
         </div>
       )}
-
-      <div className="rounded-2xl border border-steel/15 bg-white p-6 shadow-soft">
-        <h3 className="text-lg font-bold text-steel mb-4">Salary History</h3>
-        <section className="overflow-x-auto">
-          <table className="min-w-full text-left text-sm">
-            <thead>
-              <tr className="border-b-2 border-steel/20 bg-steel/5">
-                <th className="p-3 font-semibold text-steel">Month/Year</th>
-                <th className="p-3 font-semibold text-steel">Total Salary</th>
-                <th className="p-3 font-semibold text-steel">Status</th>
-                <th className="p-3 font-semibold text-steel">Payment Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {salaryHistory.map((item) => (
-                <tr key={`${item.month}-${item.year}`} className="border-b border-steel/10 hover:bg-steel/5 transition">
-                  <td className="p-3 font-medium text-graphite">{item.month}/{item.year}</td>
-                  <td className="p-3 font-semibold text-green-700">
-                    {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'VND' }).format(item.total_salary)}
-                  </td>
-                  <td className="p-3">
-                    <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
-                      item.status === 'PAID' ? 'bg-green-100 text-green-700' :
-                      item.status === 'PENDING' ? 'bg-amber-100 text-amber-700' :
-                      'bg-red-100 text-red-700'
-                    }`}>
-                      {item.status === 'PAID' ? 'Paid' :
-                       item.status === 'PENDING' ? 'Pending' :
-                       'Cancelled'}
-                    </span>
-                  </td>
-                  <td className="p-3 text-graphite text-xs">
-                    {item.payment_date ? new Date(item.payment_date).toLocaleDateString('en-US') : '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {salaryHistory.length === 0 && (
-            <div className="text-center py-10">
-              <p className="text-graphite/60">No salary history yet</p>
-            </div>
-          )}
-        </section>
-      </div>
     </section>
   );
 }
@@ -281,10 +334,9 @@ export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, 
   const menuItems = useMemo(
     () => [
       { key: "attendance", label: "Face + GPS Attendance" },
-      { key: "projects", label: "My Projects" },
       { key: "schedule", label: "Work Schedule" },
       { key: "requests", label: "Requests" },
-      { key: "salary", label: "Salary" }
+      { key: "salary", label: "My Payslip" }
     ],
     []
   );
@@ -382,7 +434,7 @@ export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, 
         </nav>
       </div>
       <div className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
-        {todayProject && (
+        {todayProject && (activePage === "attendance" || activePage === "schedule") && (
           <div className="mb-4 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-cyan-900">
             <p className="text-xs font-semibold uppercase tracking-wide">Today Work Location</p>
             <p className="mt-1 font-bold">Project: {todayProject.project_name}</p>
@@ -407,7 +459,6 @@ export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, 
           </div>
         )}
         {activePage === "attendance" && <AttendancePage token={token} profile={profile} faceEnrollmentStatus={faceEnrollmentStatus} />}
-        {activePage === "projects" && <MyProjectPage token={token} />}
         {activePage === "schedule" && <SchedulePage token={token} />}
         {activePage === "requests" && <RequestsPage token={token} profile={profile} />}
         {activePage === "salary" && <SalaryPage token={token} />}

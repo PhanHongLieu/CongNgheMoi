@@ -4,6 +4,7 @@ import SidebarMenu from "../SidebarMenu";
 import GPSLocationPage from "./ManagerGPSLocation";
 import DiaryPage from "./ManagerDiary";
 import MaterialsPage from "./ManagerMaterials";
+import RequestsManagementPage from "./HRRequests";
 import { apiRequest } from "../../lib/api";
 import { exportRowsToCsv, parseCsvText } from "../../lib/csv";
 import { getTranslation } from "../../i18n";
@@ -434,6 +435,11 @@ export function ProjectsPage({
   const [viewProject, setViewProject] = useState(null);
   const [assignmentSearch, setAssignmentSearch] = useState("");
   const [assignmentTradeFilter, setAssignmentTradeFilter] = useState("ALL");
+  const [assignmentShiftFilter, setAssignmentShiftFilter] = useState("ALL");
+  const [assignmentDateFilter, setAssignmentDateFilter] = useState("");
+  const [pmQuotaDateFilter, setPmQuotaDateFilter] = useState("");
+  const [pmQuotaMonthFilter, setPmQuotaMonthFilter] = useState("");
+  const [pmQuotaShiftFilter, setPmQuotaShiftFilter] = useState("ALL");
   const [assignmentPage, setAssignmentPage] = useState(1);
   const [bulkWorkDate, setBulkWorkDate] = useState("");
   const [bulkShiftCode, setBulkShiftCode] = useState("DAY");
@@ -446,6 +452,8 @@ export function ProjectsPage({
   const [exportToDate, setExportToDate] = useState("");
   const [workforceRangeStart, setWorkforceRangeStart] = useState("");
   const [workforceRangeEnd, setWorkforceRangeEnd] = useState("");
+  const [workforceShiftCode, setWorkforceShiftCode] = useState("DAY_SHIFT");
+  const [workforceShiftName, setWorkforceShiftName] = useState("Day Shift");
   const [workforceTradeCodeFilter, setWorkforceTradeCodeFilter] = useState("ALL");
   const [leftSelectedUserIds, setLeftSelectedUserIds] = useState([]);
   const [rightSelectedUserIds, setRightSelectedUserIds] = useState([]);
@@ -455,11 +463,13 @@ export function ProjectsPage({
   const [quotaModalOpen, setQuotaModalOpen] = useState(false);
   const [quotaDraft, setQuotaDraft] = useState({});
   const [tradeQuota, setTradeQuota] = useState({});
+  const [submittedQuotaRows, setSubmittedQuotaRows] = useState([]);
   const isPMMode = String(workforceRole || "").toUpperCase() === "PM";
   const isHRMode = String(workforceRole || "").toUpperCase() === "HR";
   const [activeDragEmployeeId, setActiveDragEmployeeId] = useState(null);
   const [activeDropTrade, setActiveDropTrade] = useState("");
   const [crossTradeAssignments, setCrossTradeAssignments] = useState({});
+  const [occupiedUserIdSet, setOccupiedUserIdSet] = useState(new Set());
   const [selectedStageProjectId, setSelectedStageProjectId] = useState("");
   const [projectStages, setProjectStages] = useState([]);
   const [stageSearch, setStageSearch] = useState("");
@@ -521,9 +531,26 @@ export function ProjectsPage({
 
   const filteredAssignments = useMemo(() => {
     const keyword = assignmentSearch.trim().toLowerCase();
+    const normalizeShiftCode = (value) => {
+      const normalized = String(value || "").trim().toUpperCase();
+      if (["NIGHT", "NIGHT_SHIFT", "NIGHTSHIFT"].includes(normalized)) {
+        return "NIGHT_SHIFT";
+      }
+      return "DAY_SHIFT";
+    };
     return assignmentListRows.filter((a) => {
       if (assignmentTradeFilter !== "ALL" && String(a.trade_code || "").toUpperCase() !== assignmentTradeFilter) {
         return false;
+      }
+      const rowShiftCode = normalizeShiftCode(a.shift_code || a.assignment_role || "");
+      if (assignmentShiftFilter !== "ALL" && rowShiftCode !== assignmentShiftFilter) {
+        return false;
+      }
+      if (assignmentDateFilter) {
+        const rowDate = String(a.work_date || a.stage_name || "").slice(0, 10);
+        if (rowDate !== assignmentDateFilter) {
+          return false;
+        }
       }
       if (!keyword) {
         return true;
@@ -531,7 +558,7 @@ export function ProjectsPage({
       const text = `${a.employee_code || ""} ${a.full_name || ""} ${a.assignment_role || ""} ${a.stage_name || ""} ${a.trade_code || ""} ${a.job_title || ""} ${a.schedule_status || ""}`.toLowerCase();
       return text.includes(keyword);
     });
-  }, [assignmentListRows, assignmentSearch, assignmentTradeFilter]);
+  }, [assignmentListRows, assignmentSearch, assignmentTradeFilter, assignmentShiftFilter, assignmentDateFilter]);
 
   const assignmentTotalPages = Math.max(1, Math.ceil(filteredAssignments.length / PAGE_SIZE));
   const safeAssignmentPage = Math.min(assignmentPage, assignmentTotalPages);
@@ -622,7 +649,7 @@ export function ProjectsPage({
 
   useEffect(() => {
     setAssignmentPage(1);
-  }, [assignmentSearch, assignmentForm.projectId, assignmentTradeFilter]);
+  }, [assignmentSearch, assignmentForm.projectId, assignmentTradeFilter, assignmentShiftFilter, assignmentDateFilter]);
 
   const tradeFilterOptions = useMemo(() => {
     const fromEmployees = employeeList.map((u) => String(u.trade_code || "").toUpperCase()).filter(Boolean);
@@ -647,9 +674,12 @@ export function ProjectsPage({
       if (workforceTradeCodeFilter !== "ALL" && employeeTrade !== workforceTradeCodeFilter) {
         return false;
       }
+      if (occupiedUserIdSet.has(Number(employee.id)) && !draftAssignedUserIdSet.has(Number(employee.id))) {
+        return false;
+      }
       return !draftAssignedUserIdSet.has(Number(employee.id));
     });
-  }, [employeeList, workforceTradeCodeFilter, draftAssignedUserIdSet]);
+  }, [employeeList, workforceTradeCodeFilter, draftAssignedUserIdSet, occupiedUserIdSet]);
 
   const assignedEmployees = useMemo(() => {
     return employeeList.filter((employee) => draftAssignedUserIdSet.has(Number(employee.id)));
@@ -666,8 +696,17 @@ export function ProjectsPage({
     }
     return map;
   }, [assignedEmployees, crossTradeAssignments]);
+  const hasSubmittedQuota = (submittedQuotaRows || []).length > 0;
 
   const assignmentTradeGroups = useMemo(() => {
+    const quotaTradeSet = new Set(
+      (submittedQuotaRows || [])
+        .map((row) => String(row.tradeCode || "").toUpperCase())
+        .filter(Boolean)
+    );
+    if (isHRMode && hasSubmittedQuota) {
+      return Array.from(quotaTradeSet).sort((a, b) => a.localeCompare(b));
+    }
     const groups = new Set();
     workforceTradeOptions
       .filter((trade) => trade !== "ALL")
@@ -675,7 +714,7 @@ export function ProjectsPage({
     Object.keys(tradeQuota || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
     Object.keys(assignedByTrade || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
     return Array.from(groups);
-  }, [workforceTradeOptions, tradeQuota, assignedByTrade]);
+  }, [workforceTradeOptions, tradeQuota, assignedByTrade, isHRMode, hasSubmittedQuota, submittedQuotaRows]);
 
   const assignedTradeCount = useMemo(() => {
     const map = {};
@@ -689,14 +728,115 @@ export function ProjectsPage({
   const filteredRequired = filteredTrade ? Number(tradeQuota[filteredTrade] || 0) : 0;
   const filteredAssigned = filteredTrade ? Number(assignedTradeCount[filteredTrade] || 0) : 0;
   const filteredMissing = filteredTrade ? Math.max(filteredRequired - filteredAssigned, 0) : 0;
+  const pmQuotaRows = useMemo(() => {
+    const monthMatch = (fromDateText, toDateText, monthValue) => {
+      if (!monthValue) return true;
+      const [y, m] = String(monthValue).split("-");
+      const year = Number(y);
+      const month = Number(m);
+      if (!year || !month) return true;
+      const monthStart = new Date(Date.UTC(year, month - 1, 1));
+      const monthEnd = new Date(Date.UTC(year, month, 0, 23, 59, 59));
+      const from = new Date(`${fromDateText}T00:00:00Z`);
+      const to = new Date(`${toDateText}T23:59:59Z`);
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return true;
+      return to >= monthStart && from <= monthEnd;
+    };
+    const dayMatch = (fromDateText, toDateText, dayValue) => {
+      if (!dayValue) return true;
+      const day = new Date(`${dayValue}T12:00:00Z`);
+      const from = new Date(`${fromDateText}T00:00:00Z`);
+      const to = new Date(`${toDateText}T23:59:59Z`);
+      if (Number.isNaN(day.getTime()) || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return true;
+      return day >= from && day <= to;
+    };
+    const sourceRows = Array.isArray(submittedQuotaRows) && submittedQuotaRows.length > 0
+      ? submittedQuotaRows.map((row) => ({
+          trade: String(row.tradeCode || "").toUpperCase(),
+          requested: Math.max(0, Number(row.requestedCount || 0)),
+          fulfilled: Math.max(0, Number(row.fulfilledCount || 0)),
+          shiftCode: String(row.shiftCode || workforceShiftCode || "DAY_SHIFT").toUpperCase(),
+          fromDate: String(row.fromDate || workforceRangeStart || ""),
+          toDate: String(row.toDate || workforceRangeEnd || "")
+        }))
+      : Object.entries(tradeQuota || {}).map(([trade, requestedRaw]) => {
+          const normalizedTrade = String(trade || "").toUpperCase();
+          const requested = Math.max(0, Number(requestedRaw || 0));
+          const fulfilled = Math.max(0, Number(assignedTradeCount[normalizedTrade] || 0));
+          return {
+            trade: normalizedTrade,
+            requested,
+            fulfilled,
+            shiftCode: workforceShiftCode,
+            fromDate: workforceRangeStart,
+            toDate: workforceRangeEnd
+          };
+        });
+    return sourceRows
+      .map((row) => {
+        const normalizedTrade = String(row.trade || "").toUpperCase();
+        const requested = Math.max(0, Number(row.requested || 0));
+        const fulfilled = Math.max(0, Number(row.fulfilled || 0));
+        const missing = Math.max(0, requested - fulfilled);
+        return {
+          trade: normalizedTrade,
+          requested,
+          fulfilled,
+          missing,
+          shiftCode: String(row.shiftCode || workforceShiftCode || "DAY_SHIFT").toUpperCase(),
+          fromDate: String(row.fromDate || workforceRangeStart || ""),
+          toDate: String(row.toDate || workforceRangeEnd || "")
+        };
+      })
+      .filter((row) => row.trade && row.requested > 0)
+      .filter((row) => (pmQuotaShiftFilter === "ALL" ? true : row.shiftCode === pmQuotaShiftFilter))
+      .filter((row) => dayMatch(row.fromDate, row.toDate, pmQuotaDateFilter))
+      .filter((row) => monthMatch(row.fromDate, row.toDate, pmQuotaMonthFilter))
+      .sort((a, b) => a.trade.localeCompare(b.trade));
+  }, [tradeQuota, submittedQuotaRows, assignedTradeCount, workforceShiftCode, workforceRangeStart, workforceRangeEnd, pmQuotaShiftFilter, pmQuotaDateFilter, pmQuotaMonthFilter]);
   const quotaStorageKey = useMemo(
     () => `workforce_quota_v1:${assignmentForm.projectId || "none"}:${workforceRangeStart || "none"}:${workforceRangeEnd || "none"}`,
     [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd]
   );
 
+  const loadSubmittedQuotaRows = useCallback(async () => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd || !workforceShiftCode) {
+      setSubmittedQuotaRows([]);
+      return;
+    }
+    try {
+      const rows = await apiRequest(
+        `/projects/workforce-quotas?projectId=${encodeURIComponent(assignmentForm.projectId)}&fromDate=${encodeURIComponent(workforceRangeStart)}&toDate=${encodeURIComponent(workforceRangeEnd)}&shiftCode=${encodeURIComponent(workforceShiftCode)}`,
+        token
+      );
+      setSubmittedQuotaRows(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      setSubmittedQuotaRows([]);
+      setStatus(`Unable to load requested quota: ${error.message}`);
+    }
+  }, [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd, workforceShiftCode, token]);
+
+  useEffect(() => {
+    if (!showAssignmentManagement) {
+      return;
+    }
+    loadSubmittedQuotaRows();
+  }, [showAssignmentManagement, loadSubmittedQuotaRows]);
+
   useEffect(() => {
     if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
       setTradeQuota({});
+      return;
+    }
+    if (isHRMode && hasSubmittedQuota) {
+      const next = {};
+      for (const row of submittedQuotaRows) {
+        const trade = String(row.tradeCode || "").toUpperCase();
+        if (trade) {
+          next[trade] = Math.max(0, Number(row.requestedCount || 0));
+        }
+      }
+      setTradeQuota(next);
       return;
     }
     try {
@@ -706,7 +846,7 @@ export function ProjectsPage({
     } catch {
       setTradeQuota({});
     }
-  }, [quotaStorageKey, assignmentForm.projectId, workforceRangeStart, workforceRangeEnd]);
+  }, [quotaStorageKey, assignmentForm.projectId, workforceRangeStart, workforceRangeEnd, isHRMode, hasSubmittedQuota, submittedQuotaRows]);
 
   useEffect(() => {
     if (!showProjectManagement) {
@@ -970,16 +1110,27 @@ export function ProjectsPage({
 
   const exportScheduleCsv = async () => {
     try {
-      const from = workforceRangeStart || exportFromDate;
-      const to = workforceRangeEnd || exportToDate;
-      if (!assignmentForm.projectId || !from || !to) {
-        setStatus("Select project and target date range");
+      if (!assignmentForm.projectId) {
+        setStatus("Select project before exporting");
         return;
       }
-      const rows = await apiRequest(
-        `/projects/work-schedules/export?projectId=${encodeURIComponent(assignmentForm.projectId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-        token
-      );
+      const rows = (Array.isArray(filteredAssignments) ? filteredAssignments : []).map((item) => ({
+        userId: Number(item.user_id || item.userId || 0),
+        employeeCode: item.employee_code || item.employeeCode || "",
+        fullName: item.full_name || item.fullName || "",
+        projectId: Number(item.project_id || item.projectId || assignmentForm.projectId || 0),
+        projectCode: item.project_code || item.projectCode || "",
+        workDate: toDisplayWorkDate(item.work_date || item.workDate || item.stage_name || ""),
+        shiftCode: item.shift_code || item.shiftCode || item.assignment_role || "",
+        shiftName: item.shift_name || item.shiftName || "",
+        shiftStartTime: item.shift_start_time || item.shiftStartTime || "",
+        shiftEndTime: item.shift_end_time || item.shiftEndTime || "",
+        status: item.schedule_status || item.status || ""
+      }));
+      if (rows.length === 0) {
+        setStatus("No records to export for current filters");
+        return;
+      }
       exportRowsToCsv(
         "work-schedules.csv",
         [
@@ -995,7 +1146,7 @@ export function ProjectsPage({
           { key: "shiftEndTime", label: "shiftEndTime" },
           { key: "status", label: "status" }
         ],
-        Array.isArray(rows) ? rows : []
+        rows
       );
       setStatus("Schedule export completed");
     } catch (error) {
@@ -1022,7 +1173,21 @@ export function ProjectsPage({
     setQuotaModalOpen(true);
   };
 
-  const saveQuotaConfig = () => {
+  const removeQuotaTrade = (tradeCode) => {
+    const target = String(tradeCode || "").toUpperCase();
+    if (!target) return;
+    const next = { ...tradeQuota };
+    delete next[target];
+    setTradeQuota(next);
+    try {
+      localStorage.setItem(quotaStorageKey, JSON.stringify(next));
+    } catch {
+      // ignore local storage write errors
+    }
+    setStatus("Quota configuration updated.");
+  };
+
+  const saveQuotaConfig = async () => {
     const next = {};
     for (const [trade, value] of Object.entries(quotaDraft || {})) {
       const num = Number(value);
@@ -1034,8 +1199,68 @@ export function ProjectsPage({
     } catch {
       // ignore local storage write errors
     }
+    if (isPMMode && assignmentForm.projectId && workforceRangeStart && workforceRangeEnd) {
+      const items = Object.entries(next)
+        .map(([tradeCode, requestedCount]) => ({
+          tradeCode: String(tradeCode || "").toUpperCase(),
+          requestedCount: Math.max(0, Number(requestedCount || 0))
+        }))
+        .filter((row) => row.tradeCode && row.requestedCount > 0);
+      if (items.length > 0) {
+        try {
+          await apiRequest("/projects/workforce-quotas/submit", token, {
+            method: "POST",
+            body: {
+              projectId: Number(assignmentForm.projectId),
+              fromDate: workforceRangeStart,
+              toDate: workforceRangeEnd,
+              shiftCode: workforceShiftCode,
+              items
+            }
+          });
+          await loadSubmittedQuotaRows();
+        } catch (error) {
+          setQuotaModalOpen(false);
+          setStatus(`Quota save failed: ${error.message}`);
+          return;
+        }
+      }
+    }
     setQuotaModalOpen(false);
     setStatus("Quota configuration updated.");
+  };
+
+  const submitQuotaRequest = async () => {
+    if (!assignmentForm.projectId || !workforceRangeStart || !workforceRangeEnd) {
+      setStatus("Select project and date range before submitting quota.");
+      return;
+    }
+    const items = Object.entries(tradeQuota || {})
+      .map(([tradeCode, requestedCount]) => ({
+        tradeCode: String(tradeCode || "").toUpperCase(),
+        requestedCount: Math.max(0, Number(requestedCount || 0))
+      }))
+      .filter((row) => row.tradeCode && row.requestedCount > 0);
+    if (items.length === 0) {
+      setStatus("No quota rows to submit.");
+      return;
+    }
+    try {
+      await apiRequest("/projects/workforce-quotas/submit", token, {
+        method: "POST",
+        body: {
+          projectId: Number(assignmentForm.projectId),
+          fromDate: workforceRangeStart,
+          toDate: workforceRangeEnd,
+          shiftCode: workforceShiftCode,
+          items
+        }
+      });
+      await loadSubmittedQuotaRows();
+      setStatus("");
+    } catch (error) {
+      setStatus(`Submit quota failed: ${error.message}`);
+    }
   };
 
   const toDateText = (value) => {
@@ -1043,6 +1268,18 @@ export function ProjectsPage({
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "";
     return date.toISOString().slice(0, 10);
+  };
+
+  const toDisplayWorkDate = (value) => {
+    const normalized = toDateText(value);
+    if (normalized) {
+      return normalized;
+    }
+    const raw = String(value || "").trim();
+    if (!raw) {
+      return "-";
+    }
+    return raw.includes("T") ? raw.split("T")[0] : raw;
   };
 
   const eachDateBetween = (fromText, toText) => {
@@ -1065,12 +1302,28 @@ export function ProjectsPage({
     }
     try {
       const rows = await apiRequest(
-        `/projects/work-schedules/export?projectId=${encodeURIComponent(assignmentForm.projectId)}&from=${encodeURIComponent(workforceRangeStart)}&to=${encodeURIComponent(workforceRangeEnd)}`,
+        `/projects/work-schedules/export?projectId=${encodeURIComponent(assignmentForm.projectId)}&from=${encodeURIComponent(workforceRangeStart)}&to=${encodeURIComponent(workforceRangeEnd)}&shiftCode=${encodeURIComponent(workforceShiftCode)}`,
         token
       );
-      const normalizedRows = (Array.isArray(rows) ? rows : []).filter(
+      let normalizedRows = (Array.isArray(rows) ? rows : []).filter(
         (item) => String(item?.status || "").toUpperCase() !== "CANCELLED"
       );
+      if (isHRMode && hasSubmittedQuota) {
+        const quotaTradeSet = new Set(
+          (submittedQuotaRows || [])
+            .map((row) => String(row.tradeCode || "").toUpperCase())
+            .filter(Boolean)
+        );
+        if (quotaTradeSet.size > 0) {
+          normalizedRows = normalizedRows.filter((item) => {
+            const employee = employeeList.find((entry) => Number(entry.id) === Number(item.userId));
+            const trade = String(employee?.trade_code || "").toUpperCase();
+            return quotaTradeSet.has(trade);
+          });
+        } else {
+          normalizedRows = [];
+        }
+      }
       setWeeklyScheduleRows(normalizedRows);
       const ids = Array.from(new Set(normalizedRows.map((item) => Number(item.userId)).filter((id) => Number.isFinite(id))));
       setDraftAssignedUserIds(ids);
@@ -1078,7 +1331,24 @@ export function ProjectsPage({
     } catch (error) {
       setStatus(`Unable to load weekly schedule: ${error.message}`);
     }
-  }, [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd, token]);
+  }, [assignmentForm.projectId, workforceRangeStart, workforceRangeEnd, workforceShiftCode, token, isHRMode, hasSubmittedQuota, submittedQuotaRows, employeeList]);
+
+  const loadOccupiedUsers = useCallback(async () => {
+    if (!workforceRangeStart || !workforceRangeEnd || !workforceShiftCode) {
+      setOccupiedUserIdSet(new Set());
+      return;
+    }
+    try {
+      const rows = await apiRequest(
+        `/projects/work-schedules/available?from=${encodeURIComponent(workforceRangeStart)}&to=${encodeURIComponent(workforceRangeEnd)}&shiftCode=${encodeURIComponent(workforceShiftCode)}`,
+        token
+      );
+      const ids = new Set((Array.isArray(rows) ? rows : []).map((row) => Number(row.userId)).filter((id) => Number.isFinite(id)));
+      setOccupiedUserIdSet(ids);
+    } catch (error) {
+      setStatus(`Unable to load available workforce: ${error.message}`);
+    }
+  }, [workforceRangeStart, workforceRangeEnd, workforceShiftCode, token]);
 
   const assignTransferUsers = async () => {
     if (leftSelectedUserIds.length === 0) {
@@ -1172,8 +1442,8 @@ export function ProjectsPage({
               projectId: Number(assignmentForm.projectId),
               userIds: toAdd,
               workDate,
-              shiftCode: "DAY",
-              shiftName: "Administrative Shift",
+              shiftCode: workforceShiftCode,
+              shiftName: workforceShiftName,
               status: "SCHEDULED"
             }
           });
@@ -1185,8 +1455,8 @@ export function ProjectsPage({
               projectId: Number(assignmentForm.projectId),
               userIds: toRemove,
               workDate,
-              shiftCode: "DAY",
-              shiftName: "Administrative Shift",
+              shiftCode: workforceShiftCode,
+              shiftName: workforceShiftName,
               status: "CANCELLED"
             }
           });
@@ -1204,9 +1474,17 @@ export function ProjectsPage({
       setStatus("Please select project and date range first.");
       return;
     }
+    const quotaTradeSet = new Set(
+      Object.entries(tradeQuota || {})
+        .filter(([, requiredRaw]) => Number(requiredRaw || 0) > 0)
+        .map(([trade]) => String(trade || "").toUpperCase())
+    );
     const availableByTrade = {};
     for (const employee of availableEmployees) {
       const trade = String(employee.trade_code || "UNASSIGNED").toUpperCase();
+      if (quotaTradeSet.size > 0 && !quotaTradeSet.has(trade)) {
+        continue;
+      }
       if (!availableByTrade[trade]) {
         availableByTrade[trade] = [];
       }
@@ -1242,7 +1520,8 @@ export function ProjectsPage({
       return;
     }
     loadWeeklyScheduleRows();
-  }, [showAssignmentManagement, loadWeeklyScheduleRows]);
+    loadOccupiedUsers();
+  }, [showAssignmentManagement, loadWeeklyScheduleRows, loadOccupiedUsers]);
 
   const downloadScheduleTemplateCsv = () => {
     exportRowsToCsv(
@@ -1493,12 +1772,26 @@ export function ProjectsPage({
               </select>
               <input className="rounded-lg border border-steel/20 bg-white px-3 py-2 text-xs" type="date" value={workforceRangeStart} onChange={(e) => setWorkforceRangeStart(e.target.value)} />
               <input className="rounded-lg border border-steel/20 bg-white px-3 py-2 text-xs" type="date" value={workforceRangeEnd} onChange={(e) => setWorkforceRangeEnd(e.target.value)} />
+              <select
+                className="rounded-lg border border-steel/20 bg-white px-3 py-2 text-xs md:col-span-2"
+                value={workforceShiftCode}
+                onChange={(e) => {
+                  const code = e.target.value;
+                  setWorkforceShiftCode(code);
+                  setWorkforceShiftName(code === "NIGHT_SHIFT" ? "Night Shift" : "Day Shift");
+                }}
+              >
+                <option value="DAY_SHIFT">DAY_SHIFT (08:00 - 17:00)</option>
+                <option value="NIGHT_SHIFT">NIGHT_SHIFT (20:00 - 04:00)</option>
+              </select>
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-graphite/70">Shift is fixed by business flow: Administrative Shift (08:00 - 17:00).</p>
-              <button type="button" disabled={!isPMMode} onClick={openQuotaModal} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
-                Set Quota
-              </button>
+              <p className="text-xs text-graphite/70">Current shift: {workforceShiftCode === "NIGHT_SHIFT" ? "20:00 - 04:00" : "08:00 - 17:00"}</p>
+              <div className="flex items-center gap-2">
+                <button type="button" disabled={!isPMMode} onClick={openQuotaModal} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+                  Set Quota
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1507,10 +1800,15 @@ export function ProjectsPage({
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-semibold text-steel">Transfer Assignment</h4>
               <div className="flex items-center gap-2">
-                <button type="button" onClick={autoAllocateTransferUsers} className="rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700">Auto Allocate</button>
-                <button type="button" onClick={saveDraftAssignment} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">Save Assignment</button>
+                <button type="button" disabled={!hasSubmittedQuota} onClick={autoAllocateTransferUsers} className="rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50">Auto Allocate</button>
+                <button type="button" disabled={!hasSubmittedQuota} onClick={saveDraftAssignment} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Save Assignment</button>
               </div>
             </div>
+            {!hasSubmittedQuota && (
+              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
+                PM must save quota first. HR assignment is locked.
+              </div>
+            )}
             {filteredTrade && (
               <div className={`mt-2 rounded-lg border px-3 py-2 text-xs font-semibold ${
                 filteredMissing > 0 ? "border-amber-200 bg-amber-50 text-amber-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -1579,7 +1877,7 @@ export function ProjectsPage({
 
           <div className="rounded-xl border border-steel/15 bg-white p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h4 className="text-sm font-semibold text-steel">Assignment List</h4>
+              <h4 className="text-sm font-semibold text-steel">{isPMMode ? "Requested Quota List" : "Assignment List"}</h4>
               <div className="flex items-center gap-2">
                 <select
                   className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
@@ -1592,7 +1890,34 @@ export function ProjectsPage({
                     </option>
                   ))}
                 </select>
-                <div className="relative">
+                {isPMMode && (
+                  <>
+                    <select
+                      className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                      value={pmQuotaShiftFilter}
+                      onChange={(e) => setPmQuotaShiftFilter(e.target.value)}
+                    >
+                      <option value="ALL">All shifts</option>
+                      <option value="DAY_SHIFT">Day shift</option>
+                      <option value="NIGHT_SHIFT">Night shift</option>
+                    </select>
+                    <input
+                      className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                      type="date"
+                      value={pmQuotaDateFilter}
+                      onChange={(e) => setPmQuotaDateFilter(e.target.value)}
+                      title="Filter quota by day"
+                    />
+                    <input
+                      className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                      type="month"
+                      value={pmQuotaMonthFilter}
+                      onChange={(e) => setPmQuotaMonthFilter(e.target.value)}
+                      title="Filter quota by month"
+                    />
+                  </>
+                )}
+                {!isPMMode && <div className="relative">
                   <button type="button" onClick={() => setExcelMenuOpen((prev) => !prev)} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">
                     Excel ⬇
                   </button>
@@ -1606,24 +1931,42 @@ export function ProjectsPage({
                       <button type="button" onClick={() => { exportScheduleCsv(); setExcelMenuOpen(false); }} className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-steel/10">Export CSV</button>
                     </div>
                   )}
-                </div>
-                <select className="rounded-lg border border-steel/20 px-3 py-2 text-xs" value={assignmentTradeFilter} onChange={(e) => setAssignmentTradeFilter(e.target.value)}>
+                </div>}
+                {!isPMMode && <select className="rounded-lg border border-steel/20 px-3 py-2 text-xs" value={assignmentTradeFilter} onChange={(e) => setAssignmentTradeFilter(e.target.value)}>
                   {tradeFilterOptions.map((item) => (
                     <option key={item} value={item}>{item === "ALL" ? "All trade" : item}</option>
                   ))}
-                </select>
+                </select>}
+                {!isPMMode && <select
+                  className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                  value={assignmentShiftFilter}
+                  onChange={(e) => setAssignmentShiftFilter(e.target.value)}
+                >
+                  <option value="ALL">All shifts</option>
+                  <option value="DAY_SHIFT">Day shift</option>
+                  <option value="NIGHT_SHIFT">Night shift</option>
+                </select>}
+                {!isPMMode && <input
+                  className="rounded-lg border border-steel/20 px-3 py-2 text-xs"
+                  type="date"
+                  value={assignmentDateFilter}
+                  onChange={(e) => setAssignmentDateFilter(e.target.value)}
+                  title="Filter by work date"
+                />}
                 <span className="text-xs text-graphite/60 whitespace-nowrap">{filteredAssignments.length} records</span>
               </div>
             </div>
-            <input
+            {!isPMMode && <input
               className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm focus:border-steel focus:outline-none"
               placeholder="Search by code/name/role/trade"
               value={assignmentSearch}
               onChange={(e) => setAssignmentSearch(e.target.value)}
-            />
+            />}
 
-          <div className="mt-3 max-h-[70vh] overflow-auto rounded-xl border border-steel/15">
-            <table className="min-w-full text-left text-xs">
+          <div className="mt-3 max-h-[70vh] overflow-x-auto overflow-y-auto rounded-xl border border-steel/15">
+            <table className={`${isPMMode ? "min-w-[980px]" : "min-w-full"} text-left text-xs`}>
+              {!isPMMode ? (
+              <>
               <thead>
                 <tr className="border-b border-steel/15 bg-steel/5">
                   <th className="p-2 font-semibold text-steel">Employee</th>
@@ -1636,7 +1979,7 @@ export function ProjectsPage({
                 {pagedAssignments.map((item) => (
                   <tr key={item.id} className="border-b border-steel/10 hover:bg-steel/5">
                     <td className="p-2 text-graphite">{item.employee_code} - {item.full_name}</td>
-                    <td className="p-2 text-graphite">{item.stage_name || "-"}</td>
+                    <td className="p-2 text-graphite">{toDisplayWorkDate(item.work_date || item.stage_name)}</td>
                     <td className="p-2 text-graphite">{item.assignment_role || "-"} / {item.schedule_status || "-"} {item.trade_code ? `(${item.trade_code})` : ""}</td>
                     <td className="p-2">
                       {item.is_schedule_row ? (
@@ -1663,9 +2006,56 @@ export function ProjectsPage({
                   </tr>
                 ))}
               </tbody>
+              </>
+              ) : (
+              <>
+              <thead>
+                <tr className="border-b border-steel/15 bg-steel/5">
+                  <th className="p-2 font-semibold text-steel">Role / Trade</th>
+                  <th className="p-2 font-semibold text-steel">Shift</th>
+                  <th className="p-2 font-semibold text-steel">Period</th>
+                  <th className="p-2 text-center font-semibold text-steel">Requested</th>
+                  <th className="p-2 text-center font-semibold text-steel">Fulfilled</th>
+                  <th className="p-2 font-semibold text-steel">Status</th>
+                  <th className="p-2 font-semibold text-steel">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pmQuotaRows.map((row) => (
+                  <tr key={`pm-quota-${row.trade}`} className="border-b border-steel/10 hover:bg-steel/5">
+                    <td className="p-2 text-graphite">{row.trade}</td>
+                    <td className="p-2 text-graphite">{row.shiftCode}</td>
+                    <td className="p-2 text-graphite">
+                      {row.fromDate && row.toDate ? `${toDisplayWorkDate(row.fromDate)} → ${toDisplayWorkDate(row.toDate)}` : "-"}
+                    </td>
+                    <td className="p-2 text-center font-semibold text-graphite">{row.requested}</td>
+                    <td className="p-2 text-center font-semibold text-graphite">{row.fulfilled}</td>
+                    <td className="p-2">
+                      {row.missing > 0 ? (
+                        <span className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-semibold text-amber-700">Shortage ({row.missing})</span>
+                      ) : (
+                        <span className="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700">Fulfilled</span>
+                      )}
+                    </td>
+                    <td className="p-2">
+                      <div className="flex items-center gap-1">
+                        <button type="button" onClick={openQuotaModal} className="rounded-lg bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-200">Edit</button>
+                        <button type="button" onClick={() => removeQuotaTrade(row.trade)} className="rounded-lg bg-red-100 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-200">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {pmQuotaRows.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="p-4 text-center text-graphite/60">No quota rows for selected filters.</td>
+                  </tr>
+                )}
+              </tbody>
+              </>
+              )}
             </table>
           </div>
-          <div className="mt-2 flex items-center justify-between text-xs">
+          {!isPMMode && <div className="mt-2 flex items-center justify-between text-xs">
             <button
               type="button"
               disabled={safeAssignmentPage <= 1}
@@ -1683,7 +2073,7 @@ export function ProjectsPage({
             >
               Next →
             </button>
-          </div>
+          </div>}
           </div>
           {quotaModalOpen && (
             <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/40 p-4">
@@ -1951,6 +2341,8 @@ function TrackingPage({
   const [locationPage, setLocationPage] = useState(1);
   const [attendancePage, setAttendancePage] = useState(1);
   const [dailyOps, setDailyOps] = useState({ date: "", projectSummary: [], roster: [] });
+  const [quotaRows, setQuotaRows] = useState([]);
+  const [progressRows, setProgressRows] = useState([]);
 
   const filteredLocations = useMemo(() => {
     const keyword = locationSearch.trim().toLowerCase();
@@ -2012,6 +2404,13 @@ function TrackingPage({
         projectSummary: Array.isArray(ops?.projectSummary) ? ops.projectSummary : [],
         roster: Array.isArray(ops?.roster) ? ops.roster : []
       });
+
+      const selectedDate = ops?.date || (filters.date || new Date().toISOString().slice(0, 10));
+      const quotaRaw = await apiRequest(`/projects/workforce-quotas?date=${encodeURIComponent(selectedDate)}${filters.projectId ? `&projectId=${encodeURIComponent(filters.projectId)}` : ""}`, token).catch(() => []);
+      setQuotaRows(Array.isArray(quotaRaw) ? quotaRaw : []);
+
+      const progressRaw = await apiRequest("/projects/reports/progress", token).catch(() => []);
+      setProgressRows(Array.isArray(progressRaw) ? progressRaw : []);
       setStatus("Tracking data loaded");
     } catch (error) {
       setStatus(`Failed to load tracking data: ${error.message}`);
@@ -2049,6 +2448,32 @@ function TrackingPage({
     const rows = Array.isArray(dailyOps.roster) ? dailyOps.roster : [];
     return rows.filter((row) => row.check_in_time);
   }, [dailyOps.roster]);
+
+  const manpowerHealth = useMemo(() => {
+    if (!Array.isArray(quotaRows) || quotaRows.length === 0) {
+      return { requested: 0, fulfilled: 0, shortage: 0 };
+    }
+    const requested = quotaRows.reduce((sum, row) => sum + Number(row.requestedCount || 0), 0);
+    const fulfilled = quotaRows.reduce((sum, row) => sum + Number(row.fulfilledCount || 0), 0);
+    return { requested, fulfilled, shortage: Math.max(0, requested - fulfilled) };
+  }, [quotaRows]);
+
+  const attendanceRate = useMemo(() => {
+    const assigned = Number(opsTotals.assigned || 0);
+    const checkedIn = Number(opsTotals.checkedIn || 0);
+    return assigned > 0 ? Math.round((checkedIn / assigned) * 100) : 0;
+  }, [opsTotals]);
+
+  const progressHealth = useMemo(() => {
+    if (!Array.isArray(progressRows) || progressRows.length === 0) return 0;
+    let rows = progressRows;
+    if (filters.projectId) {
+      rows = rows.filter((row) => String(row.project_id || row.id || "") === String(filters.projectId));
+    }
+    if (rows.length === 0) return 0;
+    const avg = rows.reduce((sum, row) => sum + Number(row.latest_progress_percent || 0), 0) / rows.length;
+    return Math.round(avg);
+  }, [progressRows, filters.projectId]);
 
   return (
     <section className="space-y-4">
@@ -2120,6 +2545,28 @@ function TrackingPage({
         <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">On Time</p><p className="text-xl font-bold text-emerald-700">{opsTotals.onTime}</p></div>
         <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Late</p><p className="text-xl font-bold text-amber-700">{opsTotals.late}</p></div>
         <div className="rounded-xl border border-steel/15 bg-white p-3"><p className="text-xs text-graphite/70">Absent</p><p className="text-xl font-bold text-rose-700">{opsTotals.absent}</p></div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className={`rounded-xl border p-3 ${manpowerHealth.shortage > 0 ? "border-rose-300 bg-rose-50" : "border-emerald-300 bg-emerald-50"}`}>
+          <p className="text-xs text-graphite/70">Manpower Health</p>
+          <p className="text-sm font-semibold text-steel">Required {manpowerHealth.requested} | Fulfilled {manpowerHealth.fulfilled}</p>
+          <p className={`text-sm font-bold ${manpowerHealth.shortage > 0 ? "text-rose-700" : "text-emerald-700"}`}>
+            {manpowerHealth.shortage > 0 ? `Shortage ${manpowerHealth.shortage}` : "Fully staffed"}
+          </p>
+        </div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3">
+          <p className="text-xs text-graphite/70">Attendance Rate</p>
+          <p className="text-2xl font-bold text-cyan-700">{attendanceRate}%</p>
+          <p className="text-xs text-graphite/70">Late {opsTotals.late} | Absent {opsTotals.absent}</p>
+        </div>
+        <div className="rounded-xl border border-steel/15 bg-white p-3">
+          <p className="text-xs text-graphite/70">Task Progress</p>
+          <p className="text-2xl font-bold text-violet-700">{progressHealth}%</p>
+          <div className="mt-2 h-2 rounded bg-slate-100">
+            <div className="h-2 rounded bg-violet-500" style={{ width: `${Math.max(0, Math.min(100, progressHealth))}%` }} />
+          </div>
+        </div>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -2263,6 +2710,82 @@ function TrackingPage({
           </div>
         </section>
         )}
+      </div>
+    </section>
+  );
+}
+
+function PMFieldApprovalsPage({ token }) {
+  const [status, setStatus] = useState("Ready");
+  const [rows, setRows] = useState([]);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await apiRequest("/requests?status=PENDING", token);
+      const normalized = Array.isArray(data) ? data : [];
+      setRows(
+        normalized.filter((item) => {
+          const type = String(item.type || "").toUpperCase();
+          return type === "OT" || type === "MISSED_PUNCH";
+        })
+      );
+      setStatus("Ready");
+    } catch (error) {
+      setStatus(`Failed to load requests: ${error.message}`);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const processRequest = async (id, nextStatus) => {
+    try {
+      await apiRequest(`/requests/${id}/status`, token, {
+        method: "PUT",
+        body: {
+          status: nextStatus,
+          reviewer_note: nextStatus === "REJECTED" ? "Rejected by PM at field" : "Approved by PM at field"
+        }
+      });
+      await load();
+    } catch (error) {
+      setStatus(`Action failed: ${error.message}`);
+    }
+  };
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <h3 className="text-lg font-bold text-steel">Field Approvals</h3>
+        <p className="text-sm text-graphite/70">One-click actions for OT and missed punch requests.</p>
+        {status !== "Ready" && <p className="mt-2 text-sm text-rose-600">{status}</p>}
+      </div>
+      <div className="grid gap-3">
+        {rows.map((item) => {
+          const type = String(item.type || "").toUpperCase();
+          const summary =
+            type === "OT"
+              ? `OT ${Number(item.request_meta?.otHours ?? item.hours ?? 0).toFixed(1)} hours`
+              : "Missed punch correction";
+          return (
+            <article key={item.id} className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-steel">
+                    {item.user_name} | {item.trade_code || "Worker"} | {summary}
+                  </p>
+                  <p className="text-xs text-graphite/70">Reason: {item.reason || "-"}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => processRequest(item.id, "REJECTED")} className="rounded-lg bg-rose-100 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-200">Reject</button>
+                  <button type="button" onClick={() => processRequest(item.id, "APPROVED")} className="rounded-lg bg-emerald-100 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-200">Approve</button>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+        {rows.length === 0 && <div className="rounded-xl border border-dashed border-steel/20 bg-white p-6 text-center text-sm text-graphite/60">No pending OT/Missed Punch requests</div>}
       </div>
     </section>
   );
@@ -6707,6 +7230,7 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
   const menuItems = useMemo(
     () => [
       { key: "attendance", label: "Real-time Attendance Dashboard" },
+      { key: "requests", label: "Request Management" },
       { key: "progress", label: "Progress" },
       { key: "gps-location", label: "GPS Location" },
       { key: "materials", label: "Materials & Planning" },
@@ -6809,6 +7333,7 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
             pageTitle="View worker attendance"
           />
         )}
+        {activePage === "requests" && <PMFieldApprovalsPage token={token} />}
         {activePage === "materials-inventory" && <MaterialsInventoryPage token={token} projects={projects} />}
         {activePage === "quantity" && (
           <ModuleCrudPage

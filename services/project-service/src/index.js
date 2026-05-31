@@ -33,6 +33,21 @@ const DEFAULT_STAGE_TEMPLATES = [
 ];
 const STAGE_STATUSES = ["NOT_STARTED", "IN_PROGRESS", "COMPLETED"];
 
+function normalizeShiftCode(input) {
+  const value = String(input || "").trim().toUpperCase();
+  if (["NIGHT", "NIGHT_SHIFT", "NIGHTSHIFT"].includes(value)) {
+    return "NIGHT_SHIFT";
+  }
+  return "DAY_SHIFT";
+}
+
+function normalizeShiftName(code, inputName) {
+  if (String(inputName || "").trim()) {
+    return String(inputName).trim();
+  }
+  return code === "NIGHT_SHIFT" ? "Night Shift" : "Day Shift";
+}
+
 async function normalizeProjectStageOrder(projectId, db = pool) {
   await db.query(
     `WITH ordered AS (
@@ -327,7 +342,7 @@ async function ensureConstructionTables() {
       created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE (user_id, project_id, shift_code, work_date)
+      UNIQUE (user_id, work_date, shift_code)
     )`
   );
 
@@ -335,20 +350,57 @@ async function ensureConstructionTables() {
     "CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_user_date ON employee_work_schedules (user_id, work_date)"
   );
   await pool.query(
+    "DROP INDEX IF EXISTS uq_employee_work_schedules_user_project_shift_date"
+  );
+  await pool.query(
+    "ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_user_id_project_id_shift_code_work__key"
+  );
+  await pool.query(
+    "ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_user_id_work_date_shift_code_key"
+  );
+  await pool.query(
+    "DROP INDEX IF EXISTS uq_employee_work_schedules_user_date_shift"
+  );
+  await pool.query(
+    `UPDATE employee_work_schedules
+     SET shift_code = CASE
+       WHEN UPPER(COALESCE(shift_code, '')) IN ('NIGHT', 'NIGHT_SHIFT', 'NIGHTSHIFT') THEN 'NIGHT_SHIFT'
+       ELSE 'DAY_SHIFT'
+     END`
+  );
+  await pool.query(
     `DELETE FROM employee_work_schedules a
      USING employee_work_schedules b
      WHERE a.id < b.id
        AND a.user_id = b.user_id
-       AND a.project_id = b.project_id
        AND a.shift_code = b.shift_code
        AND a.work_date = b.work_date`
   );
   await pool.query(
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_work_schedules_user_project_shift_date ON employee_work_schedules (user_id, project_id, shift_code, work_date)"
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_work_schedules_user_date_shift ON employee_work_schedules (user_id, work_date, shift_code)"
   );
   await pool.query("ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_status_check");
   await pool.query(
     "ALTER TABLE employee_work_schedules ADD CONSTRAINT employee_work_schedules_status_check CHECK (status IN ('SCHEDULED', 'COMPLETED', 'CANCELLED', 'DAY_OFF', 'LEAVE'))"
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS workforce_quota_requests (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      from_date DATE NOT NULL,
+      to_date DATE NOT NULL,
+      shift_code VARCHAR(30) NOT NULL,
+      trade_code VARCHAR(30) NOT NULL,
+      requested_count INTEGER NOT NULL CHECK (requested_count >= 0),
+      status VARCHAR(20) NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('SUBMITTED', 'CANCELLED')),
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (project_id, from_date, to_date, shift_code, trade_code)
+    )`
+  );
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_workforce_quota_requests_lookup ON workforce_quota_requests (project_id, from_date, to_date, shift_code, status)"
   );
 
   await pool.query(
@@ -1218,7 +1270,8 @@ app.post("/projects/:id(\\d+)/stages/:stageId(\\d+)/progress", authenticate, aut
 app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
-    const { name, address, latitude, longitude, startDate, endDate, status } = req.body;
+    const { name, address, latitude, longitude, gpsRadiusMeters, gps_radius_meters, startDate, endDate, status } = req.body;
+    const gpsRadiusValue = gpsRadiusMeters ?? gps_radius_meters;
 
     const result = await pool.query(
       `UPDATE projects
@@ -1226,13 +1279,14 @@ app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "
            address = COALESCE($2, address),
            latitude = COALESCE($3, latitude),
            longitude = COALESCE($4, longitude),
-           start_date = COALESCE($5, start_date),
-           end_date = COALESCE($6, end_date),
-           status = COALESCE($7, status),
+           gps_radius_meters = COALESCE($5, gps_radius_meters),
+           start_date = COALESCE($6, start_date),
+           end_date = COALESCE($7, end_date),
+           status = COALESCE($8, status),
            updated_at = NOW()
-       WHERE id = $8
+       WHERE id = $9
        RETURNING *`,
-      [name, address, latitude, longitude, startDate, endDate, status, projectId]
+      [name, address, latitude, longitude, gpsRadiusValue, startDate, endDate, status, projectId]
     );
 
     if (result.rowCount === 0) {
@@ -1245,7 +1299,7 @@ app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "
       recordId: String(projectId),
       username: req.user.email,
       metadata: {
-        changedFields: ["name", "address", "latitude", "longitude", "startDate", "endDate", "status"].filter(
+        changedFields: ["name", "address", "latitude", "longitude", "gpsRadiusMeters", "gps_radius_meters", "startDate", "endDate", "status"].filter(
           (field) => req.body[field] !== undefined
         )
       }
@@ -1933,15 +1987,15 @@ app.get("/projects/schedule/today", authenticate, async (req, res) => {
   }
 });
 
-app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+app.post("/projects/work-schedules/bulk", authenticate, authorize("MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   try {
     const {
       projectId,
       userIds,
       workDate,
-      shiftCode = "DAY",
-      shiftName = "Day Shift",
+      shiftCode = "DAY_SHIFT",
+      shiftName,
       shiftStartTime = "08:00",
       shiftEndTime = "17:00",
       status = "SCHEDULED"
@@ -1952,7 +2006,21 @@ app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAG
     if (!Number(projectId) || !workDate || normalizedUserIds.length === 0) {
       return res.status(400).json({ message: "projectId, workDate and userIds are required" });
     }
-
+    const normalizedShiftCode = normalizeShiftCode(shiftCode);
+    const quotaCheck = await client.query(
+      `SELECT COUNT(*)::int AS total
+       FROM workforce_quota_requests
+       WHERE project_id = $1
+         AND from_date <= $2::date
+         AND to_date >= $2::date
+         AND UPPER(shift_code) = UPPER($3)
+         AND status = 'SUBMITTED'`,
+      [Number(projectId), workDate, normalizedShiftCode]
+    );
+    if (Number(quotaCheck.rows[0]?.total || 0) <= 0) {
+      return res.status(400).json({ message: "Quota is required. PM must save quota first for this project/date/shift." });
+    }
+    const resolvedShiftName = normalizeShiftName(normalizedShiftCode, shiftName);
     await client.query("BEGIN");
     const inserted = [];
     for (const userId of normalizedUserIds) {
@@ -1963,15 +2031,16 @@ app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAG
         `INSERT INTO employee_work_schedules
            (user_id, project_id, shift_code, shift_name, shift_start_time, shift_end_time, work_date, status, created_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (user_id, project_id, shift_code, work_date)
+         ON CONFLICT (user_id, work_date, shift_code)
          DO UPDATE SET
+           project_id = EXCLUDED.project_id,
            shift_name = EXCLUDED.shift_name,
            shift_start_time = EXCLUDED.shift_start_time,
            shift_end_time = EXCLUDED.shift_end_time,
            status = EXCLUDED.status,
            updated_at = NOW()
          RETURNING *`,
-        [userId, Number(projectId), String(shiftCode || "DAY").toUpperCase(), shiftName, shiftStartTime, shiftEndTime, workDate, normalizedStatus, createdBy]
+        [userId, Number(projectId), normalizedShiftCode, resolvedShiftName, shiftStartTime, shiftEndTime, workDate, normalizedStatus, createdBy]
       );
       inserted.push(result.rows[0]);
       await client.query(
@@ -1993,13 +2062,16 @@ app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAG
       detail: error.detail,
       code: error.code
     });
+    if (String(error.code || "") === "23505") {
+      return res.status(409).json({ message: "Schedule conflict: employee already assigned this shift on selected date" });
+    }
     return res.status(500).json({ message: "Failed to bulk assign work schedules", error: error.message });
   } finally {
     client.release();
   }
 });
 
-app.post("/projects/work-schedules/import", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+app.post("/projects/work-schedules/import", authenticate, authorize("MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   try {
     const createdBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
@@ -2019,12 +2091,15 @@ app.post("/projects/work-schedules/import", authenticate, authorize("PROJECT_MAN
       const normalizedStatus = ["SCHEDULED", "COMPLETED", "CANCELLED", "DAY_OFF", "LEAVE"].includes(String(row.status || "").toUpperCase())
         ? String(row.status).toUpperCase()
         : "SCHEDULED";
+      const normalizedShiftCode = normalizeShiftCode(row.shiftCode);
+      const resolvedShiftName = normalizeShiftName(normalizedShiftCode, row.shiftName);
       await client.query(
         `INSERT INTO employee_work_schedules
            (user_id, project_id, shift_code, shift_name, shift_start_time, shift_end_time, work_date, status, created_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (user_id, project_id, shift_code, work_date)
+         ON CONFLICT (user_id, work_date, shift_code)
          DO UPDATE SET
+           project_id = EXCLUDED.project_id,
            shift_name = EXCLUDED.shift_name,
            shift_start_time = EXCLUDED.shift_start_time,
            shift_end_time = EXCLUDED.shift_end_time,
@@ -2033,8 +2108,8 @@ app.post("/projects/work-schedules/import", authenticate, authorize("PROJECT_MAN
         [
           userId,
           projectId,
-          String(row.shiftCode || "DAY").toUpperCase(),
-          row.shiftName || "Day Shift",
+          normalizedShiftCode,
+          resolvedShiftName,
           row.shiftStartTime || "08:00",
           row.shiftEndTime || "17:00",
           workDate,
@@ -2068,8 +2143,16 @@ app.get("/projects/work-schedules/export", authenticate, authorize("PROJECT_MANA
     const projectId = Number(req.query.projectId || 0);
     const from = String(req.query.from || "").trim();
     const to = String(req.query.to || "").trim();
+    const shiftCodeRaw = String(req.query.shiftCode || "").trim();
+    const shiftCode = shiftCodeRaw ? normalizeShiftCode(shiftCodeRaw) : "";
     if (!projectId || !from || !to) {
       return res.status(400).json({ message: "projectId, from, to are required" });
+    }
+    const values = [projectId, from, to];
+    let shiftFilter = "";
+    if (shiftCode) {
+      values.push(shiftCode);
+      shiftFilter = ` AND UPPER(ws.shift_code) = $${values.length}`;
     }
     const { rows } = await pool.query(
       `SELECT
@@ -2089,12 +2172,121 @@ app.get("/projects/work-schedules/export", authenticate, authorize("PROJECT_MANA
        JOIN projects p ON p.id = ws.project_id
        WHERE ws.project_id = $1
          AND ws.work_date BETWEEN $2::date AND $3::date
+         ${shiftFilter}
        ORDER BY ws.work_date ASC, ws.shift_start_time ASC, u.full_name ASC`,
-      [projectId, from, to]
+      values
     );
     return res.json(rows);
   } catch (error) {
     return res.status(500).json({ message: "Failed to export work schedules", error: error.message });
+  }
+});
+
+app.get("/projects/work-schedules/available", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  try {
+    const from = String(req.query.from || "").trim();
+    const to = String(req.query.to || "").trim();
+    const shiftCode = normalizeShiftCode(req.query.shiftCode || "DAY_SHIFT");
+    if (!from || !to) {
+      return res.status(400).json({ message: "from and to are required" });
+    }
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ws.user_id AS "userId"
+       FROM employee_work_schedules ws
+       WHERE ws.work_date BETWEEN $1::date AND $2::date
+         AND UPPER(ws.shift_code) = $3
+         AND ws.status <> 'CANCELLED'`,
+      [from, to, shiftCode]
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load available workforce data", error: error.message });
+  }
+});
+
+app.post("/projects/workforce-quotas/submit", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = Number(req.body?.projectId || 0);
+    const fromDate = String(req.body?.fromDate || "").trim();
+    const toDate = String(req.body?.toDate || "").trim();
+    const shiftCode = normalizeShiftCode(req.body?.shiftCode || "DAY_SHIFT");
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const createdBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
+    if (!projectId || !fromDate || !toDate) {
+      return res.status(400).json({ message: "projectId, fromDate, toDate are required" });
+    }
+    await client.query("BEGIN");
+    const rows = [];
+    for (const item of items) {
+      const tradeCode = String(item?.tradeCode || "").trim().toUpperCase();
+      const requestedCount = Math.max(0, Number(item?.requestedCount || 0));
+      if (!tradeCode) continue;
+      const result = await client.query(
+        `INSERT INTO workforce_quota_requests
+           (project_id, from_date, to_date, shift_code, trade_code, requested_count, status, created_by)
+         VALUES ($1,$2::date,$3::date,$4,$5,$6,'SUBMITTED',$7)
+         ON CONFLICT (project_id, from_date, to_date, shift_code, trade_code)
+         DO UPDATE SET
+           requested_count = EXCLUDED.requested_count,
+           status = 'SUBMITTED',
+           updated_at = NOW()
+         RETURNING *`,
+        [projectId, fromDate, toDate, shiftCode, tradeCode, requestedCount, createdBy]
+      );
+      rows.push(result.rows[0]);
+    }
+    await client.query("COMMIT");
+    return res.status(201).json(rows);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ message: "Failed to submit workforce quota", error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/projects/workforce-quotas", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+  try {
+    const projectId = Number(req.query.projectId || 0);
+    const fromDate = String(req.query.fromDate || "").trim();
+    const toDate = String(req.query.toDate || "").trim();
+    const shiftCode = normalizeShiftCode(req.query.shiftCode || "DAY_SHIFT");
+    if (!projectId || !fromDate || !toDate) {
+      return res.status(400).json({ message: "projectId, fromDate, toDate are required" });
+    }
+    const { rows } = await pool.query(
+      `SELECT
+         q.id,
+         q.project_id AS "projectId",
+         q.from_date AS "fromDate",
+         q.to_date AS "toDate",
+         q.shift_code AS "shiftCode",
+         q.trade_code AS "tradeCode",
+         q.requested_count AS "requestedCount",
+         q.status,
+         COALESCE((
+           SELECT COUNT(DISTINCT ws.user_id)
+           FROM employee_work_schedules ws
+           JOIN users u ON u.id = ws.user_id
+           WHERE ws.project_id = q.project_id
+             AND ws.work_date BETWEEN q.from_date AND q.to_date
+             AND UPPER(ws.shift_code) = UPPER(q.shift_code)
+             AND UPPER(COALESCE(u.trade_code, '')) = UPPER(q.trade_code)
+             AND ws.status <> 'CANCELLED'
+         ), 0)::int AS "fulfilledCount"
+       FROM workforce_quota_requests q
+       WHERE q.project_id = $1
+         AND q.from_date = $2::date
+         AND q.to_date = $3::date
+         AND UPPER(q.shift_code) = UPPER($4)
+         AND q.status = 'SUBMITTED'
+       ORDER BY q.trade_code ASC`,
+      [projectId, fromDate, toDate, shiftCode]
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load workforce quota", error: error.message });
   }
 });
 

@@ -107,6 +107,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
   const [todayScheduleStatus, setTodayScheduleStatus] = useState("");
+  const [todayScheduleData, setTodayScheduleData] = useState(null);
   const [facePreview, setFacePreview] = useState("");
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [recognitionModelLoaded, setRecognitionModelLoaded] = useState(false);
@@ -118,10 +119,14 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
   const [historyRows, setHistoryRows] = useState([]);
   const [historyProjectFilter, setHistoryProjectFilter] = useState("");
   const [historyDateFilter, setHistoryDateFilter] = useState("");
+  const [historyMonthAnchor, setHistoryMonthAnchor] = useState(() => new Date());
   const [nowTs, setNowTs] = useState(Date.now());
 
   const [statusMsg, setStatusMsg] = useState("");
   const [statusType, setStatusType] = useState("idle");
+  const [showDayOffOtModal, setShowDayOffOtModal] = useState(false);
+  const [dayOffOtReason, setDayOffOtReason] = useState("");
+  const [checkInIntent, setCheckInIntent] = useState({ allowOtCheckIn: false, otReason: "" });
   const resolvedFaceEnrollmentStatus = String(faceEnrollmentStatus || "UNREGISTERED").toUpperCase();
   const isFaceApproved = resolvedFaceEnrollmentStatus === "APPROVED";
 
@@ -255,11 +260,14 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
         if (todayData?.project_id) {
           setSelectedProject(String(todayData.project_id));
           setTodayScheduleStatus(String(todayData.schedule_status || "SCHEDULED").toUpperCase());
+          setTodayScheduleData(todayData);
         } else if (transformedProjects.length > 0) {
           setSelectedProject(String(transformedProjects[0].id));
           setTodayScheduleStatus("SCHEDULED");
+          setTodayScheduleData(null);
         } else {
           setTodayScheduleStatus("");
+          setTodayScheduleData(null);
         }
       } catch (error) {
         const cache = localStorage.getItem(SCHEDULE_CACHE_KEY);
@@ -271,9 +279,11 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
             if (parsed?.today?.project_id) {
               setSelectedProject(String(parsed.today.project_id));
               setTodayScheduleStatus(String(parsed.today.schedule_status || "SCHEDULED").toUpperCase());
+              setTodayScheduleData(parsed.today);
             } else if (cachedProjects[0]?.id) {
               setSelectedProject(String(cachedProjects[0].id));
               setTodayScheduleStatus("SCHEDULED");
+              setTodayScheduleData(null);
             }
             setStatus("Loaded cached schedule (offline mode).", "loading");
             return;
@@ -441,7 +451,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
       return { offset, eyeRatio, happy };
     };
 
-    while (Date.now() - startedAt < 1800) {
+    while (Date.now() - startedAt < 2500) {
       if (shouldAbort?.()) {
         return { passed: false, aborted: true, message: "Liveness scan restarted." };
       }
@@ -455,7 +465,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
     const expressionScore = Math.min(1, Math.max(eyeOpenDelta * 8, maxHappy));
     const stabilityScore = observedFrames >= 10 ? 1 : observedFrames >= 6 ? 0.8 : observedFrames >= 4 ? 0.6 : 0;
     const score = Number((stabilityScore * 0.45 + microMotionScore * 0.3 + expressionScore * 0.25).toFixed(4));
-    const passed = observedFrames >= 3 && score >= 0.3;
+    const passed = observedFrames >= 2 && score >= 0.2;
 
     const payload = {
       passed,
@@ -471,7 +481,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
       movementScore: Number(movement.toFixed(4)),
       eyeOpenDelta: Number(eyeOpenDelta.toFixed(4)),
       happyScoreMax: Number(maxHappy.toFixed(4)),
-      threshold: 0.3,
+      threshold: 0.2,
       capturedAt: new Date().toISOString(),
       elapsedMs: Date.now() - startedAt
     };
@@ -653,6 +663,80 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
   const isDayOffOrLeave = todayScheduleStatus === "DAY_OFF" || todayScheduleStatus === "LEAVE";
   const hasTodaySchedule = Boolean(selectedProjectData);
 
+  const maybePromptOtRequestAfterCheckout = async (checkoutResponse) => {
+    const checkedOutAt = checkoutResponse?.data?.check_out_time ? new Date(checkoutResponse.data.check_out_time) : new Date();
+    if (Number.isNaN(checkedOutAt.getTime())) return;
+
+    const shiftCode = String(todayScheduleData?.shift_code || todayScheduleData?.shiftCode || "").toUpperCase();
+    const shiftEndRaw = String(todayScheduleData?.shift_end_time || todayScheduleData?.shiftEndTime || "").slice(0, 5);
+    const fallbackThreshold = shiftCode === "NIGHT_SHIFT" ? "04:00" : "17:00";
+    const thresholdText = shiftEndRaw || fallbackThreshold;
+    const [hhText, mmText] = thresholdText.split(":");
+    const hh = Number(hhText);
+    const mm = Number(mmText);
+
+    const threshold = new Date(checkedOutAt);
+    threshold.setHours(Number.isFinite(hh) ? hh : (shiftCode === "NIGHT_SHIFT" ? 4 : 17), Number.isFinite(mm) ? mm : 0, 0, 0);
+
+    const overtimeHours = Math.max((checkedOutAt.getTime() - threshold.getTime()) / 3600000, 0);
+    if (overtimeHours <= 0) return;
+
+    const roundedHours = Number(overtimeHours.toFixed(2));
+    const shouldCreateOt = window.confirm(`System detected ${roundedHours} overtime hour(s). Create OT request now?`);
+    if (!shouldCreateOt) return;
+
+    const requestDate =
+      String(todayScheduleData?.work_date || todayScheduleData?.workDate || "").slice(0, 10) ||
+      checkedOutAt.toISOString().slice(0, 10);
+
+    const response = await fetch(`${API_BASE}/requests`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        type: "OT",
+        request_date: requestDate,
+        project_id: Number(selectedProject),
+        hours: roundedHours,
+        reason: `Auto OT confirmation from check-out at ${checkedOutAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`,
+        request_meta: {
+          requestDate,
+          otHours: roundedHours,
+          source: "AUTO_PROMPT_CHECKOUT"
+        }
+      })
+    });
+    if (!response.ok) {
+      throw new Error("Failed to create OT request");
+    }
+  };
+
+  const createOtRequestFromDayOffCheckIn = async (reason) => {
+    if (!selectedProject) return;
+    const requestDate =
+      String(todayScheduleData?.work_date || todayScheduleData?.workDate || "").slice(0, 10) ||
+      new Date().toISOString().slice(0, 10);
+    await fetch(`${API_BASE}/requests`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        type: "OT",
+        project_id: Number(selectedProject),
+        request_date: requestDate,
+        reason: String(reason || "").trim() || "Day-off OT check-in",
+        request_meta: {
+          source: "DAY_OFF_CHECKIN_UNLOCK",
+          autoGenerated: true
+        }
+      })
+    });
+  };
+
   const submitAttendance = async (type, runId = scanRunIdRef.current) => {
     const isCancelled = () => runId !== scanRunIdRef.current;
     try {
@@ -727,6 +811,10 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
         latitude: Number(frozenAttendanceCoords.latitude),
         longitude: Number(frozenAttendanceCoords.longitude)
       };
+      if (type === "in" && checkInIntent.allowOtCheckIn) {
+        payload.allowOtCheckIn = true;
+        payload.otReason = checkInIntent.otReason;
+      }
       payload.faceTemplate = faceForCheckIn;
       payload.faceEmbedding = faceEmbeddingForCheckIn;
       payload.faceSignature = faceSignatureForCheckIn;
@@ -787,6 +875,23 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
       setHasActiveCheckIn(type === "in");
       setFacePreview(faceForCheckIn);
       retryAfterLivenessTypeRef.current = null;
+      if (type === "in" && checkInIntent.allowOtCheckIn) {
+        try {
+          await createOtRequestFromDayOffCheckIn(checkInIntent.otReason);
+        } catch {
+          // check-in remains successful even if OT request creation fails
+        }
+      }
+      if (type === "out") {
+        try {
+          await maybePromptOtRequestAfterCheckout(data);
+          if (statusType !== "error") {
+            setStatus(`${type === "in" ? "Check-in" : "Check-out"} successful${distanceText}`, "success");
+          }
+        } catch {
+          // keep checkout successful even if OT request prompt/create fails
+        }
+      }
       await loadAttendanceHistory();
       return true;
     } catch (error) {
@@ -800,6 +905,11 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
 
   const beginAttendanceFlow = async (type) => {
     if (scanBusy || restartingCamera) return;
+    if (type === "in" && isDayOffOrLeave) {
+      setDayOffOtReason("");
+      setShowDayOffOtModal(true);
+      return;
+    }
     const frozenCoords = type === "in" ? (isWithinRadius ? gpsCoords : null) : gpsCoords;
     if (!frozenCoords) {
       setStatus(
@@ -820,6 +930,32 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
     setScanVisible(true);
     activeScanTypeRef.current = type;
     setScanCountdown(3);
+  };
+
+  const proceedDayOffOtCheckIn = () => {
+    const reason = String(dayOffOtReason || "").trim();
+    if (!reason) {
+      setStatus("Please provide OT reason before day-off check-in.", "error");
+      return;
+    }
+    const frozenCoords = isWithinRadius ? gpsCoords : null;
+    if (!frozenCoords) {
+      setStatus("GPS is not ready or outside radius. Wait for sync and stand within project radius.", "error");
+      setShowDayOffOtModal(false);
+      return;
+    }
+    setCheckInIntent({ allowOtCheckIn: true, otReason: reason });
+    setFrozenAttendanceCoords({
+      latitude: Number(frozenCoords.latitude),
+      longitude: Number(frozenCoords.longitude),
+      accuracy: Number(frozenCoords.accuracy || 0),
+      capturedAt: Number(frozenCoords.capturedAt || Date.now())
+    });
+    setScanType("in");
+    setScanVisible(true);
+    activeScanTypeRef.current = "in";
+    setScanCountdown(3);
+    setShowDayOffOtModal(false);
   };
 
   useEffect(() => {
@@ -867,6 +1003,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
     setScanType("");
     setScanCountdown(0);
     setFrozenAttendanceCoords(null);
+    setCheckInIntent({ allowOtCheckIn: false, otReason: "" });
     stopCamera();
     setScanVisible(false);
     setScanBusy(false);
@@ -902,19 +1039,28 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
   }, [scanVisible, scanCountdown, streaming]);
 
   const filteredHistoryRows = useMemo(() => {
+    const selectedMonth = historyMonthAnchor.getMonth();
+    const selectedYear = historyMonthAnchor.getFullYear();
     return historyRows.filter((row) => {
       if (historyProjectFilter && String(row.project_id || "") !== String(historyProjectFilter)) {
         return false;
       }
+      const inDateObj = row.check_in_time ? new Date(row.check_in_time) : null;
+      if (!inDateObj || Number.isNaN(inDateObj.getTime())) {
+        return false;
+      }
+      if (inDateObj.getMonth() !== selectedMonth || inDateObj.getFullYear() !== selectedYear) {
+        return false;
+      }
       if (historyDateFilter) {
-        const inDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : "";
+        const inDate = inDateObj.toISOString().slice(0, 10);
         if (inDate !== historyDateFilter) {
           return false;
         }
       }
       return true;
     });
-  }, [historyRows, historyProjectFilter, historyDateFilter]);
+  }, [historyRows, historyProjectFilter, historyDateFilter, historyMonthAnchor]);
 
   const statusBanner = statusMsg ? (
     <div
@@ -993,7 +1139,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
             <button
               type="button"
               onClick={() => beginAttendanceFlow("in")}
-              disabled={scanBusy || hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule || isDayOffOrLeave}
+              disabled={scanBusy || hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule}
               className="rounded-xl bg-white/95 px-4 py-3 text-sm font-bold text-emerald-700 hover:bg-white disabled:opacity-60"
             >
               Check-in
@@ -1001,7 +1147,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
             <button
               type="button"
               onClick={() => beginAttendanceFlow("out")}
-              disabled={scanBusy || !hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule || isDayOffOrLeave}
+              disabled={scanBusy || !hasActiveCheckIn || gpsLoading || gpsDistanceMeters == null || !isWithinRadius || !isFaceApproved || !hasTodaySchedule}
               className="rounded-xl bg-slate-900/80 px-4 py-3 text-sm font-bold text-white hover:bg-slate-900 disabled:opacity-60"
             >
               Check-out
@@ -1016,7 +1162,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
             <p className="mt-2 text-xs text-amber-100">You are not assigned to a project today. Please contact your project manager.</p>
           )}
           {isDayOffOrLeave && (
-            <p className="mt-2 text-xs text-amber-100">Today is your day off/leave. Attendance is locked.</p>
+            <p className="mt-2 text-xs text-amber-100">Today is your day off/leave. Press Check-in to automatically submit an OT request.</p>
           )}
           {gpsDistanceMeters != null && !isWithinRadius && (
             <p className="mt-2 text-xs text-red-200">
@@ -1084,7 +1230,6 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
                 {facePreview && (
                   <div className="mt-3 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-2">
                     <img src={facePreview} alt="Captured face" className="h-14 w-20 rounded object-cover" />
-                    <div className="text-xs text-emerald-700">Latest AI face frame used for verification.</div>
                   </div>
                 )}
               </div>
@@ -1192,15 +1337,75 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
           </div>
         </div>
       )}
+      {showDayOffOtModal && (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 px-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
+            <h3 className="text-lg font-bold text-steel">Day-off OT Confirmation</h3>
+            <p className="mt-2 text-sm text-graphite">
+              System detected today as your day off/leave. Are you currently working overtime?
+            </p>
+            <label className="mt-4 block text-sm font-semibold text-graphite">OT reason</label>
+            <textarea
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-steel/20 px-3 py-2 text-sm"
+              placeholder="Example: Concrete floor casting"
+              value={dayOffOtReason}
+              onChange={(event) => setDayOffOtReason(event.target.value)}
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDayOffOtModal(false);
+                  setDayOffOtReason("");
+                  setStatus("Check-in cancelled.", "idle");
+                }}
+                className="rounded-lg border border-steel/20 px-3 py-2 text-sm font-semibold text-graphite hover:bg-steel/5"
+              >
+                No, pressed by mistake
+              </button>
+              <button
+                type="button"
+                onClick={proceedDayOffOtCheckIn}
+                className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                Yes, I am working OT
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="space-y-3 rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <h3 className="font-semibold text-steel">Attendance History</h3>
-          <button type="button" onClick={loadAttendanceHistory} className="rounded-lg bg-steel/10 px-3 py-1.5 text-xs font-semibold text-steel hover:bg-steel/20">
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setHistoryMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+              className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel hover:bg-steel/20"
+            >
+              &lt;
+            </button>
+            <span className="text-xs font-semibold text-graphite/70">
+              Month {String(historyMonthAnchor.getMonth() + 1).padStart(2, "0")}/{historyMonthAnchor.getFullYear()}
+            </span>
+            <button
+              type="button"
+              onClick={() => setHistoryMonthAnchor((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+              className="rounded-lg bg-steel/10 px-2 py-1 text-xs font-semibold text-steel hover:bg-steel/20"
+            >
+              &gt;
+            </button>
+            <button type="button" onClick={loadAttendanceHistory} className="rounded-lg bg-steel/10 px-3 py-1.5 text-xs font-semibold text-steel hover:bg-steel/20">
+              Refresh
+            </button>
+          </div>
         </div>
         <div className="grid gap-2 md:grid-cols-3">
+          <div className="md:col-span-3 rounded-lg border border-steel/15 bg-slate-50 px-3 py-2 text-xs font-semibold text-steel">
+            {`< Month ${String(historyMonthAnchor.getMonth() + 1).padStart(2, "0")}/${historyMonthAnchor.getFullYear()} >`}
+          </div>
           <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={historyProjectFilter} onChange={(e) => setHistoryProjectFilter(e.target.value)}>
             <option value="">All projects</option>
             {projects.map((project) => (

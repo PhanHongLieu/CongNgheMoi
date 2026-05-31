@@ -1,169 +1,154 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest } from "../../lib/api";
 
-function RequestsManagementPage({ token }) {
-  const [requests, setRequests] = useState([]);
+function HRRequests({ token, profile }) {
+  const [rows, setRows] = useState([]);
   const [status, setStatus] = useState("Ready");
-  const [filterStatus, setFilterStatus] = useState("");
-  const [filterType, setFilterType] = useState("");
+  const [typeFilter, setTypeFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("PENDING");
+  const role = String(profile?.role || "").toUpperCase();
+
+  const canSeeType = useCallback(
+    (type) => {
+      if (["ADMIN", "MANAGER"].includes(role)) return true;
+      if (role === "HR_MANAGER") return type === "LEAVE";
+      if (role === "PROJECT_MANAGER") return type === "MISSED_PUNCH" || type === "OT";
+      return false;
+    },
+    [role]
+  );
 
   const load = useCallback(async () => {
     try {
       const params = new URLSearchParams();
-      if (filterStatus) params.append("status", filterStatus);
-      if (filterType) params.append("type", filterType);
-      
+      if (statusFilter !== "ALL") params.set("status", statusFilter);
       const data = await apiRequest(`/requests?${params.toString()}`, token);
-      setRequests(Array.isArray(data) ? data : []);
-      setStatus("Requests list loaded");
+      const normalized = Array.isArray(data) ? data : [];
+      setRows(normalized.filter((row) => canSeeType(String(row.type || "").toUpperCase())));
+      setStatus("Ready");
     } catch (error) {
       setStatus(`Failed to load requests: ${error.message}`);
     }
-  }, [token, filterStatus, filterType]);
+  }, [token, statusFilter, canSeeType]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const handleApprove = async (requestId) => {
+  const filtered = useMemo(() => {
+    if (typeFilter === "ALL") return rows;
+    return rows.filter((item) => String(item.type || "").toUpperCase() === typeFilter);
+  }, [rows, typeFilter]);
+
+  const toDateOnly = (value) => String(value || "").slice(0, 10);
+
+  const computeLeaveDurationLabel = (item) => {
+    const requestMeta = item?.request_meta || {};
+    const leaveType = String(requestMeta.leaveType || "").toUpperCase();
+    if (leaveType.includes("HALF_DAY")) {
+      return "0.5 day";
+    }
+    const startText = toDateOnly(item.start_date || item.request_date);
+    const endText = toDateOnly(item.end_date || item.start_date || item.request_date);
+    if (!startText) return "-";
+    const start = new Date(`${startText}T00:00:00`);
+    const end = new Date(`${endText}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "-";
+    const days = Math.max(1, Math.floor((end.getTime() - start.getTime()) / 86400000) + 1);
+    return `${days} day${days > 1 ? "s" : ""}`;
+  };
+
+  const computeOtHours = (item) => {
+    const requestMeta = item?.request_meta || {};
+    const raw = Number(requestMeta.otHours ?? item.hours ?? 0);
+    return Number.isFinite(raw) && raw > 0 ? raw.toFixed(2) : "-";
+  };
+
+  const approve = async (id) => {
     try {
-      await apiRequest(`/requests/${requestId}/status`, token, "PUT", { status: "APPROVED" });
-      load();
+      await apiRequest(`/requests/${id}/status`, token, "PUT", { status: "APPROVED" });
+      await load();
     } catch (error) {
-      setStatus(`Failed to approve request: ${error.message}`);
+      setStatus(`Approve failed: ${error.message}`);
     }
   };
 
-  const handleReject = async (requestId) => {
+  const reject = async (id) => {
+    const reviewerNote = window.prompt("Rejection reason", "") || "";
     try {
-      await apiRequest(`/requests/${requestId}/status`, token, "PUT", { status: "REJECTED" });
-      load();
+      await apiRequest(`/requests/${id}/status`, token, "PUT", { status: "REJECTED", reviewer_note: reviewerNote });
+      await load();
     } catch (error) {
-      setStatus(`Failed to reject request: ${error.message}`);
+      setStatus(`Reject failed: ${error.message}`);
     }
   };
 
   return (
     <section className="space-y-4">
-      {status && status !== "Requests list loaded" && status !== "Ready" && (
-        <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
-          <span>{status}</span>
+      {status !== "Ready" && (
+        <div className={`rounded-xl border px-3 py-2 text-xs ${status.startsWith("Failed") || status.includes("failed") ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+          {status}
         </div>
       )}
-
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <h3 className="text-lg font-bold text-steel">Request Management</h3>
-        <div className="flex gap-3">
-          <select
-            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-          >
-            <option value="">All types</option>
-            <option value="leave">Leave request</option>
-            <option value="late">Late/Early leave</option>
-            <option value="overtime">Overtime registration</option>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-lg font-bold text-steel">Requests Review</h3>
+        <div className="flex items-center gap-2">
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-xs" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="ALL">All types</option>
+            {canSeeType("LEAVE") && <option value="LEAVE">Leave</option>}
+            {canSeeType("MISSED_PUNCH") && <option value="MISSED_PUNCH">Missed Punch</option>}
+            {canSeeType("OT") && <option value="OT">OT</option>}
           </select>
-          <select
-            className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-          >
-            <option value="">All statuses</option>
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-xs" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="PENDING">Pending</option>
             <option value="APPROVED">Approved</option>
             <option value="REJECTED">Rejected</option>
+            <option value="ALL">All statuses</option>
           </select>
-          <button
-            type="button"
-            onClick={load}
-            className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition"
-          >
-            Reload
-          </button>
         </div>
       </div>
-
-      <div className="rounded-2xl border border-steel/15 bg-white shadow-soft overflow-hidden">
-        <table className="min-w-full text-left text-sm">
+      <div className="overflow-x-auto rounded-xl border border-steel/15 bg-white">
+        <table className="min-w-full text-left text-xs">
           <thead>
-            <tr className="border-b-2 border-steel/20 bg-steel/5">
-              <th className="p-3 font-semibold text-steel">Employee</th>
-              <th className="p-3 font-semibold text-steel">Request Type</th>
-              <th className="p-3 font-semibold text-steel">Date</th>
-              <th className="p-3 font-semibold text-steel">Reason</th>
-              <th className="p-3 font-semibold text-steel">Status</th>
-              <th className="p-3 font-semibold text-steel">Actions</th>
+            <tr className="border-b border-steel/15 bg-steel/5">
+              <th className="p-2 font-semibold text-steel">Employee</th>
+              <th className="p-2 font-semibold text-steel">Type</th>
+              <th className="p-2 font-semibold text-steel">Applied Date</th>
+              <th className="p-2 font-semibold text-steel">Duration</th>
+              <th className="p-2 font-semibold text-steel">OT Hours</th>
+              <th className="p-2 font-semibold text-steel">Reason</th>
+              <th className="p-2 font-semibold text-steel">Status</th>
+              <th className="p-2 font-semibold text-steel">Action</th>
             </tr>
           </thead>
           <tbody>
-            {requests.map((request) => (
-              <tr key={request.id} className="border-b border-steel/10 hover:bg-steel/5 transition">
-                <td className="p-3">
-                  <div className="font-medium text-graphite">{request.user_name}</div>
-                  <div className="text-xs text-graphite/60">{request.employee_code}</div>
-                </td>
-                <td className="p-3">
-                  <span className="inline-flex items-center gap-1">
-                    {request.type === 'leave' ? 'Leave' :
-                     request.type === 'late' ? 'Late/Early' :
-                     'Overtime'}
-                  </span>
-                </td>
-                <td className="p-3 text-graphite text-xs">
-                  {request.start_date && `From: ${new Date(request.start_date).toLocaleDateString('en-US')}`}
-                  {request.end_date && <br />}
-                  {request.end_date && `To: ${new Date(request.end_date).toLocaleDateString('en-US')}`}
-                  {request.hours && <br />}
-                  {request.hours && `${request.hours} hours`}
-                </td>
-                <td className="p-3 text-graphite text-xs max-w-xs truncate">{request.reason}</td>
-                <td className="p-3">
-                  <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
-                    request.status === 'APPROVED' ? 'bg-green-100 text-green-700' :
-                    request.status === 'PENDING' ? 'bg-amber-100 text-amber-700' :
-                    'bg-red-100 text-red-700'
-                  }`}>
-                    {request.status === 'APPROVED' ? 'Approved' :
-                     request.status === 'PENDING' ? 'Pending' :
-                     'Rejected'}
-                  </span>
-                </td>
-                <td className="p-3">
-                  {request.status === 'PENDING' && (
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleApprove(request.id)}
-                        className="rounded-lg bg-green-500 px-3 py-1 text-xs font-medium text-white hover:bg-green-600"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleReject(request.id)}
-                        className="rounded-lg bg-red-500 px-3 py-1 text-xs font-medium text-white hover:bg-red-600"
-                      >
-                        Reject
-                      </button>
+            {filtered.map((item) => (
+              <tr key={item.id} className="border-b border-steel/10">
+                <td className="p-2 text-graphite">{item.employee_code} - {item.user_name}</td>
+                <td className="p-2 text-graphite">{item.type}</td>
+                <td className="p-2 text-graphite">{String(item.request_date || item.start_date || "").slice(0, 10)}</td>
+                <td className="p-2 text-graphite">{String(item.type || "").toUpperCase() === "LEAVE" ? computeLeaveDurationLabel(item) : "-"}</td>
+                <td className="p-2 text-graphite">{String(item.type || "").toUpperCase() === "OT" ? computeOtHours(item) : "-"}</td>
+                <td className="p-2 text-graphite">{item.reason}</td>
+                <td className="p-2 text-graphite">{item.status}</td>
+                <td className="p-2">
+                  {String(item.status || "").toUpperCase() === "PENDING" ? (
+                    <div className="flex gap-1">
+                      <button type="button" onClick={() => approve(item.id)} className="rounded bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-200">Approve</button>
+                      <button type="button" onClick={() => reject(item.id)} className="rounded bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-700 hover:bg-rose-200">Reject</button>
                     </div>
-                  )}
-                  {request.status !== 'PENDING' && (
-                    <span className="text-xs text-graphite/60">Processed</span>
+                  ) : (
+                    <span className="text-[11px] text-graphite/60">Processed</span>
                   )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        {requests.length === 0 && (
-          <div className="text-center py-10">
-            <p className="text-graphite/60">No requests</p>
-          </div>
-        )}
+        {filtered.length === 0 && <div className="p-4 text-center text-xs text-graphite/60">No requests</div>}
       </div>
     </section>
   );
 }
 
-export default RequestsManagementPage;
+export default HRRequests;

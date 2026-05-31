@@ -18,6 +18,7 @@
   face_enrollment_reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   face_enrollment_note TEXT,
   hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000,
+  base_monthly_salary NUMERIC(14,2) NOT NULL DEFAULT 0,
   job_title VARCHAR(120),
   skill_level VARCHAR(30),
   trade_code VARCHAR(30),
@@ -51,6 +52,7 @@ BEGIN
 END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'WORKING';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(14,2) NOT NULL DEFAULT 35000;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS base_monthly_salary NUMERIC(14,2) NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title VARCHAR(120);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS skill_level VARCHAR(30);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trade_code VARCHAR(30);
@@ -446,7 +448,7 @@ CREATE TABLE IF NOT EXISTS employee_work_schedules (
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE (user_id, project_id, shift_code, work_date)
+  UNIQUE (user_id, work_date, shift_code)
 );
 ALTER TABLE employee_work_schedules DROP CONSTRAINT IF EXISTS employee_work_schedules_status_check;
 ALTER TABLE employee_work_schedules
@@ -480,6 +482,17 @@ CREATE TABLE IF NOT EXISTS salaries (
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(user_id, month, year)
+);
+
+CREATE TABLE IF NOT EXISTS salary_month_settings (
+  id SERIAL PRIMARY KEY,
+  month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+  year INTEGER NOT NULL CHECK (year BETWEEN 2000 AND 2100),
+  standard_working_days NUMERIC(6,2) NOT NULL CHECK (standard_working_days > 0),
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (month, year)
 );
 
 CREATE TABLE IF NOT EXISTS holidays (
@@ -516,6 +529,9 @@ ON requests (project_id, type);
 
 CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_user_date
 ON employee_work_schedules (user_id, work_date);
+DROP INDEX IF EXISTS uq_employee_work_schedules_user_project_shift_date;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_work_schedules_user_date_shift
+ON employee_work_schedules (user_id, work_date, shift_code);
 
 CREATE TABLE IF NOT EXISTS project_progress_updates (
   id SERIAL PRIMARY KEY,

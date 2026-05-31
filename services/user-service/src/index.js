@@ -23,6 +23,7 @@ const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
 const DEFAULT_NEW_USER_PASSWORD = "123456";
 const EMPLOYMENT_STATUSES = ["WORKING", "RESIGNED"];
 const DEFAULT_MONTHLY_STANDARD_HOURS = Number(process.env.SALARY_STANDARD_HOURS || 208);
+const DEFAULT_STANDARD_WORKING_DAYS = Number(process.env.SALARY_STANDARD_WORKING_DAYS || 26);
 const DEFAULT_HOURLY_RATE = Number(process.env.SALARY_HOURLY_RATE || 35000);
 const DEFAULT_OVERTIME_MULTIPLIER = Number(process.env.SALARY_OVERTIME_MULTIPLIER || 1.5);
 const BUSINESS_START_HOUR = Number(process.env.SALARY_BUSINESS_START_HOUR || 8);
@@ -299,6 +300,26 @@ function normalizeHolidayMode(input) {
   return HOLIDAY_MODES.includes(mode) ? mode : "exclude";
 }
 
+async function resolveStandardWorkingDays(month, year, fallback = null) {
+  const fallbackValue = Number.isFinite(Number(fallback)) && Number(fallback) > 0 ? Number(fallback) : DEFAULT_STANDARD_WORKING_DAYS;
+  try {
+    const { rows } = await pool.query(
+      `SELECT standard_working_days
+       FROM salary_month_settings
+       WHERE month = $1 AND year = $2
+       LIMIT 1`,
+      [month, year]
+    );
+    const fromDb = Number(rows[0]?.standard_working_days || 0);
+    if (Number.isFinite(fromDb) && fromDb > 0) {
+      return fromDb;
+    }
+    return fallbackValue;
+  } catch {
+    return fallbackValue;
+  }
+}
+
 function parseDataUrl(input) {
   const value = String(input || "").trim();
   const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(value);
@@ -338,13 +359,14 @@ function buildAttendanceMetricsQuery(includeUserFilter) {
               ON h.holiday_date = t.work_date
              AND h.is_active = TRUE
             WHERE t.work_date >= $1::date
-              AND t.work_date <= $2::date
+              AND t.work_date < $2::date
               AND t.timesheet_status IN ('READY', 'LOCKED', 'APPROVED')
               ${userFilterClause}
           ),
           aggregated AS (
             SELECT
               user_id,
+              COUNT(DISTINCT work_date)::numeric AS worked_days,
               ROUND(SUM(CASE WHEN holiday_multiplier IS NULL THEN worked_hours ELSE 0 END)::numeric, 2) AS non_holiday_worked_hours,
               ROUND(SUM(CASE WHEN holiday_multiplier IS NULL THEN overtime_hours ELSE 0 END)::numeric, 2) AS non_holiday_overtime_hours,
               ROUND(SUM(CASE WHEN holiday_multiplier IS NOT NULL THEN worked_hours ELSE 0 END)::numeric, 2) AS holiday_worked_hours,
@@ -360,7 +382,7 @@ function buildAttendanceMetricsQuery(includeUserFilter) {
               COUNT(*)::int AS missing_logs
             FROM timesheets t
             WHERE t.work_date >= $1::date
-              AND t.work_date <= $2::date
+              AND t.work_date < $2::date
               AND t.timesheet_status IN ('MISSING_OUT', 'PENDING', 'INVALID')
               ${userFilterClause}
             GROUP BY t.user_id
@@ -368,6 +390,7 @@ function buildAttendanceMetricsQuery(includeUserFilter) {
           SELECT
             COALESCE(ag.user_id, iv.user_id) AS user_id,
             COALESCE(ag.non_holiday_worked_hours, 0) AS non_holiday_worked_hours,
+            COALESCE(ag.worked_days, 0) AS worked_days,
             COALESCE(ag.non_holiday_overtime_hours, 0) AS non_holiday_overtime_hours,
             COALESCE(ag.holiday_worked_hours, 0) AS holiday_worked_hours,
             COALESCE(ag.holiday_overtime_hours, 0) AS holiday_overtime_hours,
@@ -389,6 +412,7 @@ async function loadAttendanceMetrics(monthStart, monthEnd, userId = null) {
   return new Map(
     result.rows.map((row) => [Number(row.user_id), {
       nonHolidayWorkedHours: Number(row.non_holiday_worked_hours || 0),
+      workedDays: Number(row.worked_days || 0),
       nonHolidayOvertimeHours: Number(row.non_holiday_overtime_hours || 0),
       holidayWorkedHours: Number(row.holiday_worked_hours || 0),
       holidayOvertimeHours: Number(row.holiday_overtime_hours || 0),
@@ -440,6 +464,7 @@ app.get("/users", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER"), asyn
               u.skill_level,
               u.trade_code,
               u.specialization,
+              u.base_monthly_salary,
               u.job_title_id,
               u.profile_image_url,
               u.created_at,
@@ -471,12 +496,15 @@ app.get("/users/face-status", authenticate, authorize("HR_MANAGER"), async (req,
               u.employee_code,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
               u.email,
+              u.profile_image_url,
+              u.face_template,
               COALESCE(u.status, 'WORKING') AS status,
               CASE WHEN u.face_template IS NULL THEN FALSE ELSE TRUE END AS has_face_template,
               COALESCE(u.face_enrollment_status, 'UNREGISTERED') AS face_enrollment_status,
               u.face_enrollment_submitted_at,
               u.face_enrollment_reviewed_at,
-              u.face_enrollment_reviewed_by
+              u.face_enrollment_reviewed_by,
+              u.face_enrollment_note
        FROM users u
        LEFT JOIN accounts a ON a.user_id = u.id
        WHERE COALESCE(a.role, 'EMPLOYEE') NOT IN ('SUPER_ADMIN', 'ADMIN')
@@ -735,6 +763,7 @@ app.get("/users/:id", authenticate, async (req, res) => {
               u.skill_level,
               u.trade_code,
               u.specialization,
+              u.base_monthly_salary,
               u.job_title_id,
               u.profile_image_url,
               u.face_template,
@@ -786,6 +815,7 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
       skillLevel,
       tradeCode,
       specialization,
+      baseMonthlySalary,
       jobTitleId
     } = req.body;
 
@@ -808,9 +838,9 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
     await client.query("BEGIN");
     const insertedUser = await client.query(
       `INSERT INTO users (
-        first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, face_template, status, job_title, skill_level, trade_code, specialization, job_title_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-      RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, job_title_id, created_at`,
+        first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, face_template, status, job_title, skill_level, trade_code, specialization, job_title_id, base_monthly_salary
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+      RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, base_monthly_salary, job_title_id, created_at`,
       [
         normalizedNames.firstName,
         normalizedNames.lastName,
@@ -827,7 +857,8 @@ app.post("/users", authenticate, authorize("HR_MANAGER"), async (req, res) => {
         skillLevel || null,
         tradeCode || null,
         specialization || null,
-        jobTitleId == null ? null : Number(jobTitleId)
+        jobTitleId == null ? null : Number(jobTitleId),
+        toNumber(baseMonthlySalary) ?? 0
       ]
     );
 
@@ -876,7 +907,7 @@ app.put("/users/:id", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "
     if (req.user.role === "EMPLOYEE" && req.user.sub !== userId) {
       return res.status(403).json({ message: "Forbidden" });
     }
-    const { firstName, lastName, fullName, phone, email, gender, birthDate, address, profileImageUrl, faceTemplate, employmentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId } = req.body;
+    const { firstName, lastName, fullName, phone, email, gender, birthDate, address, profileImageUrl, faceTemplate, employmentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId, baseMonthlySalary } = req.body;
 
     const normalizedNames = normalizeNameInput(firstName, lastName, fullName);
     const nextFirstName = normalizedNames.firstName || undefined;
@@ -914,10 +945,11 @@ app.put("/users/:id", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER", "
            trade_code = COALESCE($13, trade_code),
            specialization = COALESCE($14, specialization),
            job_title_id = COALESCE($15, job_title_id),
+           base_monthly_salary = COALESCE($16, base_monthly_salary),
            updated_at = NOW()
-       WHERE id = $16
-       RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, job_title_id, updated_at`,
-      [nextFirstName, nextLastName, phone, email, gender, normalizedBirthDate, address, profileImageUrl, faceTemplate, normalizedEmploymentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId == null ? null : Number(jobTitleId), userId]
+       WHERE id = $17
+       RETURNING id, employee_code, first_name, last_name, full_name, phone, email, gender, birth_date, address, profile_image_url, status, job_title, skill_level, trade_code, specialization, base_monthly_salary, job_title_id, updated_at`,
+      [nextFirstName, nextLastName, phone, email, gender, normalizedBirthDate, address, profileImageUrl, faceTemplate, normalizedEmploymentStatus, jobTitle, skillLevel, tradeCode, specialization, jobTitleId == null ? null : Number(jobTitleId), toNumber(baseMonthlySalary), userId]
     );
 
     if (result.rowCount === 0) {
@@ -1162,6 +1194,7 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
     const month = toNumber(req.body.month) || now.getMonth() + 1;
     const year = toNumber(req.body.year) || now.getFullYear();
     const standardHours = toNumber(req.body.standardHours) ?? DEFAULT_MONTHLY_STANDARD_HOURS;
+    const requestedStandardWorkingDays = toNumber(req.body.standardWorkingDays);
     const globalHourlyRate = toNumber(req.body.hourlyRate);
     const overtimeMultiplier = toNumber(req.body.overtimeMultiplier) ?? DEFAULT_OVERTIME_MULTIPLIER;
     const userId = req.body.userId == null ? null : toNumber(req.body.userId);
@@ -1183,6 +1216,16 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
 
     const monthStart = `${year}-${String(month).padStart(2, "0")}-01T00:00:00.000Z`;
     const monthEnd = new Date(Date.UTC(year, month, 1)).toISOString();
+    const standardWorkingDays = await resolveStandardWorkingDays(month, year, requestedStandardWorkingDays);
+    if (requestedStandardWorkingDays && requestedStandardWorkingDays > 0) {
+      await pool.query(
+        `INSERT INTO salary_month_settings (month, year, standard_working_days, updated_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (month, year)
+         DO UPDATE SET standard_working_days = EXCLUDED.standard_working_days, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+        [month, year, requestedStandardWorkingDays, req.user.sub]
+      );
+    }
     const attendanceMetrics = await loadAttendanceMetrics(monthStart, monthEnd, userId);
 
     const employeeParams = [];
@@ -1193,7 +1236,7 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
     }
 
     const employeeResult = await pool.query(
-      `SELECT u.id, COALESCE(u.hourly_rate, $1::numeric) AS hourly_rate
+      `SELECT u.id, COALESCE(u.hourly_rate, $1::numeric) AS hourly_rate, COALESCE(u.base_monthly_salary, 0) AS base_monthly_salary
        FROM users u
        JOIN accounts a ON a.user_id = u.id
        WHERE a.role = 'EMPLOYEE'
@@ -1227,22 +1270,35 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
         missingLogs: 0
       };
       const { workedHours, overtimeHours, holidayHoursExcluded } = applyHolidayPolicy(metrics, holidayMode);
-      const hourlyRate = globalHourlyRate ?? Number(row.hourly_rate || DEFAULT_HOURLY_RATE);
-      const overtimeRate = roundMoney(hourlyRate * overtimeMultiplier);
+      const baseMonthlySalary = Number(row.base_monthly_salary || 0);
+      const fallbackHourlyRate = Number(row.hourly_rate || DEFAULT_HOURLY_RATE);
+      const hourlyRate = globalHourlyRate ?? (baseMonthlySalary > 0 ? baseMonthlySalary / standardWorkingDays / 8 : fallbackHourlyRate);
+      const dailyRate = baseMonthlySalary > 0 ? baseMonthlySalary / standardWorkingDays : hourlyRate * 8;
+      const workedDays = Number(metrics.workedDays || 0);
+      const cappedWorkedDays = Math.min(workedDays, standardWorkingDays);
+      const overflowWorkedDays = Math.max(0, workedDays - standardWorkingDays);
+      const overtimeRate = roundMoney((dailyRate / 8) * overtimeMultiplier);
       const paidBaseHours = workedHours;
-      const baseSalary = roundMoney(paidBaseHours * hourlyRate);
+      const adjustedOvertimeHours = Number((overtimeHours + overflowWorkedDays * 8).toFixed(2));
+      const baseSalary = roundMoney(cappedWorkedDays * dailyRate);
       const bonus = 0;
       const deductions = 0;
-      const totalSalary = roundMoney(baseSalary + overtimeHours * overtimeRate + bonus - deductions);
+      const totalSalary = roundMoney(baseSalary + adjustedOvertimeHours * overtimeRate + bonus - deductions);
 
       records.push({
         userId: employeeId,
         month,
         year,
         workedHours,
+        workedDays: Number(workedDays.toFixed(2)),
+        cappedWorkedDays: Number(cappedWorkedDays.toFixed(2)),
+        overflowWorkedDays: Number(overflowWorkedDays.toFixed(2)),
         standardHours,
+        standardWorkingDays,
+        baseMonthlySalary,
+        dailyRate: roundMoney(dailyRate),
         paidBaseHours,
-        overtimeHours,
+        overtimeHours: adjustedOvertimeHours,
         hourlyRate,
         overtimeRate,
         baseSalary,
@@ -1267,9 +1323,15 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
              base_salary = EXCLUDED.base_salary,
              overtime_hours = EXCLUDED.overtime_hours,
              overtime_rate = EXCLUDED.overtime_rate,
-             bonus = EXCLUDED.bonus,
-             deductions = EXCLUDED.deductions,
-             total_salary = EXCLUDED.total_salary,
+             bonus = COALESCE(salaries.bonus, 0),
+             deductions = COALESCE(salaries.deductions, 0),
+             total_salary = ROUND(
+               EXCLUDED.base_salary
+               + (EXCLUDED.overtime_hours * EXCLUDED.overtime_rate)
+               + COALESCE(salaries.bonus, 0)
+               - COALESCE(salaries.deductions, 0),
+               2
+             ),
              notes = EXCLUDED.notes,
              status = 'PENDING',
              updated_at = NOW()`,
@@ -1283,7 +1345,7 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
             item.bonus,
             item.deductions,
             item.totalSalary,
-            `AUTO_CALCULATED_FROM_TIMESHEETS: workedHours=${item.workedHours}, overtimeHours=${item.overtimeHours}, holidayMode=${holidayMode}, missingLogs=${item.missingAttendanceLogs}, hourlyRate=${item.hourlyRate}`
+            `AUTO_CALCULATED_FROM_TIMESHEETS: workedHours=${item.workedHours}, workedDays=${item.workedDays}, cappedWorkedDays=${item.cappedWorkedDays}, overflowWorkedDays=${item.overflowWorkedDays}, overtimeHours=${item.overtimeHours}, holidayMode=${holidayMode}, missingLogs=${item.missingAttendanceLogs}, hourlyRate=${item.hourlyRate}, baseMonthlySalary=${item.baseMonthlySalary}, standardWorkingDays=${item.standardWorkingDays}, dailyRate=${item.dailyRate}`
           ]
         );
       }
@@ -1300,6 +1362,7 @@ app.post("/salary/calculate", authenticate, authorize("HR_MANAGER"), async (req,
         userId,
         recordCount: records.length,
         standardHours,
+        standardWorkingDays,
         hourlyRate: globalHourlyRate,
         overtimeMultiplier,
         holidayMode,
@@ -1333,6 +1396,7 @@ app.get("/salary/manage", authenticate, authorize("HR_MANAGER"), async (req, res
 
     const monthStart = `${year}-${String(month).padStart(2, "0")}-01T00:00:00.000Z`;
     const monthEnd = new Date(Date.UTC(year, month, 1)).toISOString();
+    const standardWorkingDays = await resolveStandardWorkingDays(month, year, null);
     const metricsByUser = await loadAttendanceMetrics(monthStart, monthEnd, null);
     const params = [month, year, DEFAULT_HOURLY_RATE];
     let keywordClause = "";
@@ -1352,6 +1416,7 @@ app.get("/salary/manage", authenticate, authorize("HR_MANAGER"), async (req, res
          u.employee_code,
          COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
          u.email,
+         COALESCE(u.base_monthly_salary, 0) AS base_monthly_salary,
          COALESCE(u.hourly_rate, $3::numeric) AS hourly_rate,
          s.id AS salary_id,
          s.base_salary,
@@ -1362,7 +1427,15 @@ app.get("/salary/manage", authenticate, authorize("HR_MANAGER"), async (req, res
          s.total_salary,
          s.status,
          s.payment_date,
-         s.notes
+         s.notes,
+         (
+           SELECT COUNT(1)
+           FROM attendance_logs al
+           WHERE al.user_id = u.id
+             AND DATE(al.check_in_time) >= make_date($2::int, $1::int, 1)
+             AND DATE(al.check_in_time) < (make_date($2::int, $1::int, 1) + INTERVAL '1 month')
+             AND al.attendance_status = 'LATE'
+         ) AS late_count
        FROM users u
        JOIN accounts a ON a.user_id = u.id
        LEFT JOIN salaries s ON s.user_id = u.id AND s.month = $1 AND s.year = $2
@@ -1387,6 +1460,8 @@ app.get("/salary/manage", authenticate, authorize("HR_MANAGER"), async (req, res
       return {
         ...row,
         worked_hours: workedHours,
+        worked_days: Number(metrics.workedDays || 0),
+        standard_working_days: standardWorkingDays,
         overtime_hours_calculated: overtimeHours,
         missing_attendance_logs: metrics.missingLogs,
         holiday_mode: holidayMode,
@@ -1405,6 +1480,7 @@ app.get("/salary/manage", authenticate, authorize("HR_MANAGER"), async (req, res
     return res.json({
       month,
       year,
+      standardWorkingDays,
       records
     });
   } catch (error) {
@@ -1419,12 +1495,15 @@ app.get("/salary", authenticate, authorize("EMPLOYEE"), async (req, res) => {
     const currentYear = year ? Number(year) : new Date().getFullYear();
 
     const result = await pool.query(
-      `SELECT s.*, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name, u.employee_code
+      `SELECT s.*, COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name, u.employee_code,
+              COALESCE(u.base_monthly_salary, 0) AS base_monthly_salary,
+              COALESCE(cfg.standard_working_days, $4::numeric) AS standard_working_days
        FROM salaries s
        JOIN users u ON s.user_id = u.id
+       LEFT JOIN salary_month_settings cfg ON cfg.month = s.month AND cfg.year = s.year
        WHERE s.user_id = $1 AND s.month = $2 AND s.year = $3
        ORDER BY s.created_at DESC`,
-      [req.user.sub, currentMonth, currentYear]
+      [req.user.sub, currentMonth, currentYear, DEFAULT_STANDARD_WORKING_DAYS]
     );
 
     await writeDataLog({
@@ -1494,8 +1573,153 @@ app.get("/users/salary/history", async (req, res) => {
   return app._router.handle(req, res);
 });
 
+app.put("/users/salary/manage/:userId/adjustments", authenticate, authorize("HR_MANAGER"), async (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    const month = toNumber(req.body.month);
+    const year = toNumber(req.body.year);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ message: "userId is invalid" });
+    }
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "month/year are invalid" });
+    }
+
+    const lunchAllowance = Math.max(0, toNumber(req.body.lunchAllowance) || 0);
+    const transportAllowance = Math.max(0, toNumber(req.body.transportAllowance) || 0);
+    const progressBonus = Math.max(0, toNumber(req.body.progressBonus) || 0);
+    const safetyPenalty = Math.max(0, toNumber(req.body.safetyPenalty) || 0);
+    const advanceDeduction = Math.max(0, toNumber(req.body.advanceDeduction) || 0);
+    const autoLatePenalty = Math.max(0, toNumber(req.body.autoLatePenalty) || 0);
+
+    const totalAllowances = lunchAllowance + transportAllowance + progressBonus;
+    const totalDeductions = autoLatePenalty + safetyPenalty + advanceDeduction;
+
+    const salaryResult = await pool.query(
+      `SELECT id, base_salary, overtime_hours, overtime_rate, status
+       FROM salaries
+       WHERE user_id = $1 AND month = $2 AND year = $3
+       LIMIT 1`,
+      [userId, month, year]
+    );
+    if (salaryResult.rowCount === 0) {
+      return res.status(404).json({ message: "Salary record not found for selected period" });
+    }
+    const row = salaryResult.rows[0];
+    if (String(row.status || "").toUpperCase() === "LOCKED" || String(row.status || "").toUpperCase() === "PAID") {
+      return res.status(409).json({ message: "Payroll already finalized/locked. Adjustments are disabled." });
+    }
+    const baseSalary = Number(row.base_salary || 0);
+    const overtimePay = Number(row.overtime_hours || 0) * Number(row.overtime_rate || 0);
+    const totalSalary = roundMoney(baseSalary + overtimePay + totalAllowances - totalDeductions);
+    const breakdown = {
+      lunchAllowance,
+      transportAllowance,
+      progressBonus,
+      autoLatePenalty,
+      safetyPenalty,
+      advanceDeduction
+    };
+
+    await pool.query(
+      `UPDATE salaries
+       SET bonus = $1,
+           deductions = $2,
+           total_salary = $3,
+           notes = CONCAT('ADJUSTMENT_BREAKDOWN:', $4::text),
+           updated_at = NOW()
+       WHERE id = $5`,
+      [roundMoney(totalAllowances), roundMoney(totalDeductions), totalSalary, JSON.stringify(breakdown), row.id]
+    );
+
+    return res.json({
+      userId,
+      month,
+      year,
+      totalAllowances: roundMoney(totalAllowances),
+      totalDeductions: roundMoney(totalDeductions),
+      totalSalary
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update salary adjustments", error: error.message });
+  }
+});
+
+app.post("/users/salary/finalize", authenticate, authorize("HR_MANAGER"), async (req, res) => {
+  try {
+    const month = toNumber(req.body.month);
+    const year = toNumber(req.body.year);
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "month/year are invalid" });
+    }
+    const result = await pool.query(
+      `UPDATE salaries
+       SET status = 'LOCKED',
+           payment_date = COALESCE(payment_date, NOW()),
+           updated_at = NOW()
+       WHERE month = $1 AND year = $2`,
+      [month, year]
+    );
+    return res.json({ message: "Payroll finalized", affectedRows: result.rowCount });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to finalize payroll", error: error.message });
+  }
+});
+
+app.get("/users/salary/settings", authenticate, authorize("HR_MANAGER"), async (req, res) => {
+  try {
+    const now = new Date();
+    const month = toNumber(req.query.month) || now.getMonth() + 1;
+    const year = toNumber(req.query.year) || now.getFullYear();
+    const standardWorkingDays = await resolveStandardWorkingDays(month, year, null);
+    return res.json({ month, year, standardWorkingDays });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load salary settings", error: error.message });
+  }
+});
+
+app.put("/users/salary/settings", authenticate, authorize("HR_MANAGER"), async (req, res) => {
+  try {
+    const month = toNumber(req.body.month);
+    const year = toNumber(req.body.year);
+    const standardWorkingDays = toNumber(req.body.standardWorkingDays);
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "month/year are invalid" });
+    }
+    if (!standardWorkingDays || standardWorkingDays <= 0) {
+      return res.status(400).json({ message: "standardWorkingDays must be positive" });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO salary_month_settings (month, year, standard_working_days, updated_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (month, year)
+       DO UPDATE SET standard_working_days = EXCLUDED.standard_working_days, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+       RETURNING month, year, standard_working_days`,
+      [month, year, standardWorkingDays, req.user.sub]
+    );
+    return res.json({ month: rows[0].month, year: rows[0].year, standardWorkingDays: Number(rows[0].standard_working_days) });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update salary settings", error: error.message });
+  }
+});
+
 async function ensureSalarySchema() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(14,2) NOT NULL DEFAULT ${DEFAULT_HOURLY_RATE}`);
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS base_monthly_salary NUMERIC(14,2) NOT NULL DEFAULT 0");
+  await pool.query(`UPDATE users SET base_monthly_salary = ROUND(COALESCE(base_monthly_salary, 0), 2)`);
+  await pool.query(`UPDATE users SET base_monthly_salary = ROUND(COALESCE(hourly_rate, ${DEFAULT_HOURLY_RATE}) * ${DEFAULT_MONTHLY_STANDARD_HOURS}, 2) WHERE COALESCE(base_monthly_salary, 0) <= 0`);
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS salary_month_settings (
+      id SERIAL PRIMARY KEY,
+      month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+      year INTEGER NOT NULL CHECK (year BETWEEN 2000 AND 2100),
+      standard_working_days NUMERIC(6,2) NOT NULL CHECK (standard_working_days > 0),
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (month, year)
+    )`
+  );
 
   await pool.query(
     `CREATE TABLE IF NOT EXISTS holidays (

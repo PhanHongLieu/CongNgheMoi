@@ -10,11 +10,11 @@ const port = Number(process.env.ATTENDANCE_SERVICE_PORT || 3004);
 const MAX_DISTANCE_METERS = Number(process.env.GPS_RADIUS_METERS || 100);
 const EMBEDDING_PASS_THRESHOLD = Number(process.env.FACE_EMBEDDING_THRESHOLD || 0.88);
 const SIGNATURE_PASS_THRESHOLD = Number(process.env.FACE_SIGNATURE_THRESHOLD || 0.76);
-const LIVENESS_PASS_THRESHOLD = Number(process.env.FACE_LIVENESS_THRESHOLD || 0.3);
-const FACE_IMPOSTOR_EMBEDDING_MARGIN = Number(process.env.FACE_IMPOSTOR_EMBEDDING_MARGIN || 0.015);
-const FACE_IMPOSTOR_SIGNATURE_MARGIN = Number(process.env.FACE_IMPOSTOR_SIGNATURE_MARGIN || 0.03);
-const FACE_IMPOSTOR_MIN_POOL = Number(process.env.FACE_IMPOSTOR_MIN_POOL || 3);
-const FACE_IMPOSTOR_ABSOLUTE_FLOOR = Number(process.env.FACE_IMPOSTOR_ABSOLUTE_FLOOR || 0.9);
+const LIVENESS_PASS_THRESHOLD = Number(process.env.FACE_LIVENESS_THRESHOLD || 0.2);
+const FACE_IMPOSTOR_EMBEDDING_MARGIN = Number(process.env.FACE_IMPOSTOR_EMBEDDING_MARGIN || 0.01);
+const FACE_IMPOSTOR_SIGNATURE_MARGIN = Number(process.env.FACE_IMPOSTOR_SIGNATURE_MARGIN || 0.02);
+const FACE_IMPOSTOR_MIN_POOL = Number(process.env.FACE_IMPOSTOR_MIN_POOL || 8);
+const FACE_IMPOSTOR_ABSOLUTE_FLOOR = Number(process.env.FACE_IMPOSTOR_ABSOLUTE_FLOOR || 0.93);
 const STANDARD_WORK_HOURS = Number(process.env.TIMESHEET_STANDARD_HOURS || 8);
 const HALF_WORK_HOURS = Number(process.env.TIMESHEET_HALF_DAY_HOURS || 4);
 const DEFAULT_LUNCH_BREAK_HOURS = Number(process.env.TIMESHEET_LUNCH_BREAK_HOURS || 1.5);
@@ -36,6 +36,7 @@ async function ensureAttendanceSchema() {
       ADD COLUMN IF NOT EXISTS face_mode VARCHAR(30),
       ADD COLUMN IF NOT EXISTS liveness_score NUMERIC(6,4),
       ADD COLUMN IF NOT EXISTS attendance_status VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS note TEXT,
       ADD COLUMN IF NOT EXISTS is_within_geofence_in BOOLEAN,
       ADD COLUMN IF NOT EXISTS gps_distance_in_m NUMERIC(10,2),
       ADD COLUMN IF NOT EXISTS is_within_geofence_out BOOLEAN,
@@ -46,7 +47,7 @@ async function ensureAttendanceSchema() {
   await pool.query(`
     ALTER TABLE attendance_logs
     ADD CONSTRAINT attendance_logs_attendance_status_check
-    CHECK (attendance_status IN ('PRESENT', 'LATE', 'EARLY_LEAVE', 'ABSENT', 'ON_LEAVE', 'OPEN', 'COMPLETED', 'MISSING_OUT', 'INVALID'))
+    CHECK (attendance_status IN ('PRESENT', 'LATE', 'EARLY_LEAVE', 'ABSENT', 'ON_LEAVE', 'OPEN', 'COMPLETED', 'MISSING_OUT', 'INVALID', 'PENDING_OT_APPROVAL'))
   `);
   await pool.query(`
     UPDATE attendance_logs
@@ -101,6 +102,9 @@ function round2(value) {
 function computeTimesheetMetrics(row) {
   const checkIn = row.check_in_time ? new Date(row.check_in_time) : null;
   const checkOut = row.check_out_time ? new Date(row.check_out_time) : null;
+  const shiftCode = String(row.shift_code || "DAY_SHIFT").toUpperCase();
+  const shiftStartTime = String(row.shift_start_time || "").slice(0, 5);
+  const shiftEndTime = String(row.shift_end_time || "").slice(0, 5);
   const isMissingOut = !checkOut && checkIn && new Date(checkIn.toISOString().slice(0, 10)) < new Date(new Date().toISOString().slice(0, 10));
   if (!checkIn || !checkOut || isMissingOut) {
     return {
@@ -118,7 +122,28 @@ function computeTimesheetMetrics(row) {
   const breakHours = rawWorkHours >= 6 ? DEFAULT_LUNCH_BREAK_HOURS : 0;
   const actualHours = Math.max(rawWorkHours - breakHours, 0);
   const workingDayValue = actualHours >= STANDARD_WORK_HOURS ? 1 : actualHours >= HALF_WORK_HOURS ? 0.5 : 0;
-  const otHours = actualHours > STANDARD_WORK_HOURS ? actualHours - STANDARD_WORK_HOURS : 0;
+
+  const [startHour, startMinute] = shiftStartTime.split(":").map((value) => Number(value));
+  const [endHour, endMinute] = shiftEndTime.split(":").map((value) => Number(value));
+  const threshold = new Date(checkIn);
+  const fallbackEndHour = shiftCode === "NIGHT_SHIFT" ? 4 : 17;
+  const fallbackEndMinute = 0;
+  threshold.setHours(
+    Number.isFinite(endHour) ? endHour : fallbackEndHour,
+    Number.isFinite(endMinute) ? endMinute : fallbackEndMinute,
+    0,
+    0
+  );
+  const isOvernightShift =
+    shiftCode === "NIGHT_SHIFT" ||
+    (Number.isFinite(startHour) &&
+      Number.isFinite(endHour) &&
+      (endHour < startHour || (endHour === startHour && Number(endMinute || 0) <= Number(startMinute || 0))));
+  if (isOvernightShift) {
+    threshold.setDate(threshold.getDate() + 1);
+  }
+  const otHours = Math.max((checkOut.getTime() - threshold.getTime()) / 3600000, 0);
+
   return {
     rawWorkHours: round2(rawWorkHours),
     breakHours: round2(breakHours),
@@ -130,14 +155,79 @@ function computeTimesheetMetrics(row) {
   };
 }
 
+async function upsertTimesheetForAttendanceRow(row) {
+  const metrics = computeTimesheetMetrics(row);
+  const workDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : null;
+  await pool.query(
+    `INSERT INTO timesheets
+    (attendance_log_id, user_id, project_id, work_date, check_in_time, check_out_time, raw_work_hours, break_hours, actual_hours, working_day_value, ot_hours, timesheet_status, source, notes, computed_at, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'SYSTEM',$13,NOW(),NOW())
+    ON CONFLICT (attendance_log_id)
+    DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      project_id = EXCLUDED.project_id,
+      work_date = EXCLUDED.work_date,
+      check_in_time = EXCLUDED.check_in_time,
+      check_out_time = EXCLUDED.check_out_time,
+      raw_work_hours = EXCLUDED.raw_work_hours,
+      break_hours = EXCLUDED.break_hours,
+      actual_hours = EXCLUDED.actual_hours,
+      working_day_value = EXCLUDED.working_day_value,
+      ot_hours = EXCLUDED.ot_hours,
+      timesheet_status = EXCLUDED.timesheet_status,
+      notes = EXCLUDED.notes,
+      computed_at = NOW(),
+      updated_at = NOW()`,
+    [
+      row.id,
+      row.user_id,
+      row.project_id,
+      workDate,
+      row.check_in_time,
+      row.check_out_time,
+      metrics.rawWorkHours,
+      metrics.breakHours,
+      metrics.actualHours,
+      metrics.workingDayValue,
+      metrics.otHours,
+      metrics.timesheetStatus,
+      metrics.note
+    ]
+  );
+}
+
 async function recomputeTimesheets() {
   const { rows } = await pool.query(`
-    SELECT id, user_id, project_id, check_in_time, check_out_time, attendance_status
-    FROM attendance_logs
-    WHERE check_in_time IS NOT NULL
+    SELECT
+      al.id,
+      al.user_id,
+      al.project_id,
+      al.check_in_time,
+      al.check_out_time,
+      al.attendance_status,
+      ws.shift_code,
+      ws.shift_start_time,
+      ws.shift_end_time
+    FROM attendance_logs al
+    LEFT JOIN employee_work_schedules ws
+      ON ws.user_id = al.user_id
+     AND ws.project_id = al.project_id
+     AND ws.work_date = DATE(al.check_in_time)
+    WHERE al.check_in_time IS NOT NULL
+    ORDER BY al.id ASC, ws.updated_at DESC NULLS LAST
   `);
 
+  const uniqueRows = [];
+  const seen = new Set();
   for (const row of rows) {
+    if (seen.has(row.id)) {
+      continue;
+    }
+    seen.add(row.id);
+    uniqueRows.push(row);
+  }
+
+  for (const row of uniqueRows) {
     const metrics = computeTimesheetMetrics(row);
     const workDate = row.check_in_time ? new Date(row.check_in_time).toISOString().slice(0, 10) : null;
     await pool.query(
@@ -450,10 +540,10 @@ function validateLivenessPayload(payload) {
       return { passed: false, message: "Liveness challenge does not cover required actions" };
     }
   }
-  if (elapsedMs == null || elapsedMs < 1200 || elapsedMs > 18000) {
+  if (elapsedMs == null || elapsedMs < 800 || elapsedMs > 18000) {
     return { passed: false, message: "Liveness challenge timing is invalid" };
   }
-  const minFrames = type === "PASSIVE_FAST_V1" ? 3 : 6;
+  const minFrames = type === "PASSIVE_FAST_V1" ? 1 : 6;
   if (observedFrames == null || observedFrames < minFrames) {
     return { passed: false, message: "Insufficient liveness frames" };
   }
@@ -593,7 +683,7 @@ async function verifyFaceForUser(userId, incomingEmbedding, incomingSignature, f
     const signatureAmbiguous =
       impostorScores.bestSignatureScore >= FACE_IMPOSTOR_ABSOLUTE_FLOOR &&
       impostorScores.bestSignatureScore >= signatureMatch.score - FACE_IMPOSTOR_SIGNATURE_MARGIN;
-    if (embeddingAmbiguous || signatureAmbiguous) {
+    if (embeddingAmbiguous && signatureAmbiguous) {
       return {
         ok: false,
         code: 401,
@@ -634,8 +724,14 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
       return res.status(403).json({ message: "No schedule found for today. Please contact your project manager." });
     }
     const scheduleStatus = String(todaySchedule.status || "").toUpperCase();
-    if (scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE") {
-      return res.status(403).json({ message: "Today is your day off. Attendance is locked." });
+    const isDayOffOrLeave = scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE";
+    const allowOtCheckIn = Boolean(req.body.allowOtCheckIn);
+    const otReason = String(req.body.otReason || "").trim();
+    if (isDayOffOrLeave && !allowOtCheckIn) {
+      return res.status(403).json({ message: "Today is your day off/leave. Press Check-in to submit OT request automatically." });
+    }
+    if (isDayOffOrLeave && !otReason) {
+      return res.status(400).json({ message: "OT reason is required for day-off check-in." });
     }
     if (Number(todaySchedule.project_id) !== Number(projectId)) {
       return res.status(403).json({ message: "Project does not match your assigned schedule for today." });
@@ -699,12 +795,19 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
         matchResult.score,
         matchResult.mode,
         livenessResult.score || null,
-        "OPEN",
+        isDayOffOrLeave ? "PENDING_OT_APPROVAL" : "OPEN",
         true,
         Number(distance.toFixed(2)),
         String(req.body.device || "MOBILE_WEB").slice(0, 80)
       ]
     );
+
+    if (isDayOffOrLeave) {
+      await pool.query(
+        "UPDATE attendance_logs SET note = $1 WHERE id = $2",
+        [`Auto OT check-in pending PM approval. Reason: ${otReason}`, insertResult.rows[0].id]
+      );
+    }
 
     await writeDataLog({
       action: "check-in",
@@ -718,12 +821,13 @@ app.post("/attendance/check-in", authenticate, async (req, res) => {
         score: Number(matchResult.score.toFixed(4)),
         signatureScore: Number(signatureMatch.score.toFixed(4)),
         mode: matchResult.mode,
-        livenessScore: Number((livenessResult.score || 0).toFixed(4))
+        livenessScore: Number((livenessResult.score || 0).toFixed(4)),
+        dayOffOtFlow: isDayOffOrLeave ? { pendingApproval: true, reason: otReason } : undefined
       }
     });
 
     return res.status(201).json({
-      message: "Check-in successful",
+      message: isDayOffOrLeave ? "Check-in successful. Pending OT approval from PM." : "Check-in successful",
       distanceMeters: Number(distance.toFixed(2)),
       data: insertResult.rows[0]
     });
@@ -753,8 +857,15 @@ app.post("/attendance/check-out", authenticate, async (req, res) => {
       return res.status(403).json({ message: "No schedule found for today. Please contact your project manager." });
     }
     const scheduleStatus = String(todaySchedule.status || "").toUpperCase();
-    if (scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE") {
-      return res.status(403).json({ message: "Today is your day off. Attendance is locked." });
+    const isDayOffOrLeave = scheduleStatus === "DAY_OFF" || scheduleStatus === "LEAVE";
+    if (isDayOffOrLeave) {
+      const activeLogOnDayOff = await pool.query(
+        "SELECT id FROM attendance_logs WHERE user_id = $1 AND project_id = $2 AND check_out_time IS NULL",
+        [userId, projectId]
+      );
+      if (activeLogOnDayOff.rowCount === 0) {
+        return res.status(403).json({ message: "Today is your day off/leave. No active OT check-in found." });
+      }
     }
     if (Number(todaySchedule.project_id) !== Number(projectId)) {
       return res.status(403).json({ message: "Project does not match your assigned schedule for today." });
@@ -862,10 +973,15 @@ app.get("/attendance/history", authenticate, async (req, res) => {
       SELECT a.*,
              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.last_name, u.first_name)), ''), u.full_name) AS full_name,
              u.employee_code,
-             p.name AS project_name
+             p.name AS project_name,
+             t.working_day_value AS timesheet_working_day_value,
+             t.ot_hours AS timesheet_ot_hours,
+             t.timesheet_status AS timesheet_status,
+             t.actual_hours AS timesheet_actual_hours
       FROM attendance_logs a
       JOIN users u ON a.user_id = u.id
       JOIN projects p ON a.project_id = p.id
+      LEFT JOIN timesheets t ON t.attendance_log_id = a.id
       ${condition}
       ORDER BY a.created_at DESC
     `;
@@ -988,15 +1104,18 @@ app.put("/attendance/history/:id", authenticate, authorize("HR_MANAGER", "PROJEC
       return res.status(400).json({ message: "checkOutTime must be later than or equal to checkInTime" });
     }
 
+    const attendanceStatus = nextCheckOutTime ? "COMPLETED" : "OPEN";
     const result = await pool.query(
       `UPDATE attendance_logs
        SET project_id = $1,
            check_in_time = $2,
-           check_out_time = $3
-       WHERE id = $4
+           check_out_time = $3,
+           attendance_status = $4
+       WHERE id = $5
        RETURNING id, user_id, project_id, check_in_time, check_out_time, check_in_latitude, check_in_longitude, check_out_latitude, check_out_longitude, face_score, created_at`,
-      [nextProjectId, nextCheckInTime, nextCheckOutTime, attendanceId]
+      [nextProjectId, nextCheckInTime, nextCheckOutTime, attendanceStatus, attendanceId]
     );
+    await upsertTimesheetForAttendanceRow(result.rows[0]);
 
     await writeDataLog({
       action: "update",
