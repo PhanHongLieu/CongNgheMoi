@@ -8,7 +8,7 @@ Kien truc free de lam do an:
 - Backend: Render free Web Services
 - Database: Supabase free Postgres
 - Object storage: MinIO tren Railway co volume neu can upload anh face enrollment
-- AI Chatbox: Render free Web Service rieng, goi OpenAI API tu backend
+- AI Chatbox: Render free Web Service rieng, goi Gemini API tu backend
 
 Luu y: host free co gioi han. Render free service co the sleep khi khong co request, lan truy cap dau co the cham. Supabase free co gioi han dung luong va co the pause neu khong su dung trong thoi gian dai.
 
@@ -83,9 +83,15 @@ Render tu cap bien `PORT`, khong can tu set `PORT`.
 Rieng `mdp-ai-service`, them cac bien AI:
 
 ```env
-AI_PROVIDER=openai
-AI_MODEL=gpt-4o-mini
-OPENAI_API_KEY=<OpenAI API key cua ban>
+AI_PROVIDER=gemini
+AI_MODEL=gemini-2.5-flash
+GEMINI_API_KEY=<Gemini API key cua ban>
+```
+
+Lay Gemini API key tai Google AI Studio:
+
+```txt
+https://aistudio.google.com/app/apikey
 ```
 
 ## 4. Bien moi truong cho gateway

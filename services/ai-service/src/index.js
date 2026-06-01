@@ -10,8 +10,9 @@ const port = Number(process.env.PORT || process.env.AI_SERVICE_PORT || 3007);
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
-const AI_PROVIDER = String(process.env.AI_PROVIDER || "openai").toLowerCase();
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+const AI_PROVIDER = String(process.env.AI_PROVIDER || "gemini").toLowerCase();
+const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === "gemini" ? "gemini-2.5-flash" : "gpt-4o-mini");
 
 const dbConfig = process.env.DATABASE_URL
   ? {
@@ -215,32 +216,45 @@ function fallbackAnswer(context, question) {
   const pendingRisk = risks.find((item) => Number(item.out_of_stock_items || 0) > 0 || Number(item.over_usage_items || 0) > 0);
   const firstProject = overview[0];
   const lines = [];
-  lines.push("AI is not fully configured yet because OPENAI_API_KEY is missing.");
+  const expectedKey = AI_PROVIDER === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+  lines.push(`AI is not fully configured yet because ${expectedKey} is missing.`);
   if (firstProject) {
     lines.push(`Current project snapshot: ${firstProject.project_code} - ${firstProject.name}, status ${firstProject.status}, progress ${firstProject.progress_percent || 0}%.`);
   }
   if (pendingRisk) {
     lines.push(`Material risk detected in ${pendingRisk.project_code}: ${pendingRisk.out_of_stock_items || 0} out-of-stock item(s), ${pendingRisk.over_usage_items || 0} over-usage item(s).`);
   }
-  lines.push(`Your question was: "${question}". Add OPENAI_API_KEY and AI_MODEL on ai-service to enable full answers.`);
+  lines.push(`Your question was: "${question}". Add ${expectedKey} and AI_MODEL on ai-service to enable full answers.`);
   return lines.join("\n");
 }
 
-async function askOpenAI({ question, messages, context, user }) {
-  if (AI_PROVIDER !== "openai") {
-    throw new Error(`Unsupported AI_PROVIDER: ${AI_PROVIDER}`);
-  }
-  if (!OPENAI_API_KEY) {
-    return fallbackAnswer(context, question);
-  }
-
-  const systemPrompt = [
+function buildSystemPrompt() {
+  return [
     "You are the MDP System AI assistant for a construction workforce and project management platform.",
     "Answer in the user's language. Be concise, practical, and based only on the provided system context.",
     "Respect role-based access. Do not claim access to data outside the context.",
     "If data is missing, say what is missing and which screen or report the user should check.",
     "For operations that change data, explain the steps; do not pretend you changed records."
   ].join(" ");
+}
+
+function buildContextPrompt(context, user) {
+  return `Authenticated user: ${JSON.stringify({
+    id: user.sub,
+    role: user.role,
+    email: user.email
+  })}\nSystem context:\n${contextToText(context)}`;
+}
+
+async function askOpenAI({ question, messages, context, user }) {
+  if (!OPENAI_API_KEY) {
+    return fallbackAnswer(context, question);
+  }
+
+  const systemPrompt = [
+    buildSystemPrompt(),
+    buildContextPrompt(context, user)
+  ].join("\n\n");
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -253,14 +267,6 @@ async function askOpenAI({ question, messages, context, user }) {
       temperature: 0.2,
       messages: [
         { role: "system", content: systemPrompt },
-        {
-          role: "system",
-          content: `Authenticated user: ${JSON.stringify({
-            id: user.sub,
-            role: user.role,
-            email: user.email
-          })}\nSystem context:\n${contextToText(context)}`
-        },
         ...normalizeMessages(messages),
         { role: "user", content: question }
       ]
@@ -295,6 +301,70 @@ async function askOpenAI({ question, messages, context, user }) {
   return data?.choices?.[0]?.message?.content || "I could not generate an answer.";
 }
 
+function toGeminiContents(messages, question) {
+  const history = normalizeMessages(messages).map((item) => ({
+    role: item.role === "assistant" ? "model" : "user",
+    parts: [{ text: item.content }]
+  }));
+  history.push({ role: "user", parts: [{ text: question }] });
+  return history;
+}
+
+async function askGemini({ question, messages, context, user }) {
+  if (!GEMINI_API_KEY) {
+    return fallbackAnswer(context, question);
+  }
+
+  const model = AI_MODEL || "gemini-2.5-flash";
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": GEMINI_API_KEY
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: `${buildSystemPrompt()}\n\n${buildContextPrompt(context, user)}` }]
+      },
+      contents: toGeminiContents(messages, question),
+      generationConfig: {
+        temperature: 0.2
+      }
+    })
+  });
+
+  const raw = await response.text();
+  let data = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    data = raw;
+  }
+
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || raw || `Gemini request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const text = data?.candidates?.[0]?.content?.parts
+    ?.map((part) => part.text || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  return text || "I could not generate an answer.";
+}
+
+async function askAI(payload) {
+  if (AI_PROVIDER === "gemini" || AI_PROVIDER === "google") {
+    return askGemini(payload);
+  }
+  if (AI_PROVIDER === "openai") {
+    return askOpenAI(payload);
+  }
+  throw new Error(`Unsupported AI_PROVIDER: ${AI_PROVIDER}`);
+}
+
 app.post("/ai/chat", authenticate, async (req, res) => {
   try {
     const question = String(req.body?.message || "").trim();
@@ -305,7 +375,7 @@ app.post("/ai/chat", authenticate, async (req, res) => {
       return res.status(400).json({ message: "Message is too long" });
     }
     const context = await buildRoleContext(req.user);
-    const answer = await askOpenAI({
+    const answer = await askAI({
       question,
       messages: req.body?.messages,
       context,
@@ -314,7 +384,8 @@ app.post("/ai/chat", authenticate, async (req, res) => {
     return res.json({
       message: "AI response generated",
       answer,
-      model: OPENAI_API_KEY ? AI_MODEL : "not-configured",
+      provider: AI_PROVIDER,
+      model: (AI_PROVIDER === "gemini" ? GEMINI_API_KEY : OPENAI_API_KEY) ? AI_MODEL : "not-configured",
       contextSections: context.map((item) => item.name)
     });
   } catch (error) {
