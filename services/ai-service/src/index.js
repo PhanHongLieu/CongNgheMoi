@@ -276,6 +276,20 @@ async function askOpenAI({ question, messages, context, user }) {
   }
   if (!response.ok) {
     const message = data?.error?.message || data?.message || raw || `OpenAI request failed (${response.status})`;
+    const code = data?.error?.code || data?.code || "";
+    const type = data?.error?.type || data?.type || "";
+    const quotaExceeded =
+      response.status === 429 &&
+      (String(code).includes("insufficient_quota") ||
+        String(type).includes("insufficient_quota") ||
+        String(message).toLowerCase().includes("quota"));
+    if (quotaExceeded) {
+      return [
+        fallbackAnswer(context, question),
+        "",
+        "OpenAI API quota is exhausted for the configured key. Add billing/credits or replace OPENAI_API_KEY to enable full AI responses."
+      ].join("\n");
+    }
     throw new Error(message);
   }
   return data?.choices?.[0]?.message?.content || "I could not generate an answer.";
