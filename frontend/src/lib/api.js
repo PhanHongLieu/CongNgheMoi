@@ -31,7 +31,9 @@ function normalizeApiErrorMessage(data, raw, response) {
     return data.error ? `${data.message}: ${data.error}` : data.message;
   }
   const text = String(raw || data || "").trim();
-  if (text.startsWith("<!DOCTYPE") || text.startsWith("<html") || response.status === 502) {
+  const contentType = response.headers.get("content-type") || "";
+  const isHtml = contentType.includes("text/html") || text.includes("<!DOCTYPE") || text.includes("<html");
+  if (isHtml || response.status === 502) {
     return `Service unavailable (${response.status}). Please check backend deployment logs.`;
   }
   return text || `Request failed (${response.status})`;

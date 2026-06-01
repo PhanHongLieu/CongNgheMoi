@@ -164,6 +164,24 @@ function isTokenExpired(token) {
   return Number(payload.exp) * 1000 <= Date.now();
 }
 
+async function readApiResponse(response) {
+  const rawBody = await response.text();
+  let data = {};
+  try {
+    data = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    const text = String(rawBody || "").trim();
+    const contentType = response.headers.get("content-type") || "";
+    const isHtml = contentType.includes("text/html") || text.includes("<!DOCTYPE") || text.includes("<html");
+    data = {
+      message: isHtml || response.status === 502
+        ? `Service unavailable (${response.status}). Please check backend deployment logs.`
+        : text || `Request failed (${response.status})`
+    };
+  }
+  return data;
+}
+
 function BellIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -652,13 +670,7 @@ export default function App() {
         body: JSON.stringify({ employeeCode, password })
       });
 
-      const rawBody = await response.text();
-      let data = {};
-      try {
-        data = rawBody ? JSON.parse(rawBody) : {};
-      } catch {
-        data = { message: rawBody || "Invalid server response" };
-      }
+      const data = await readApiResponse(response);
 
       if (!response.ok) {
         if (data?.lockedUntil) {
