@@ -604,10 +604,29 @@ async function assertProjectAssignment(userId, projectId, role) {
     return { ok: true };
   }
   const assignment = await pool.query(
-    "SELECT id FROM project_assignments WHERE user_id = $1 AND project_id = $2",
+    `SELECT id
+     FROM project_assignments
+     WHERE user_id = $1
+       AND project_id = $2
+       AND COALESCE(assignment_status, 'ACTIVE') = 'ACTIVE'
+     LIMIT 1`,
     [userId, projectId]
   );
-  if (assignment.rowCount === 0) {
+  if (assignment.rowCount > 0) {
+    return { ok: true };
+  }
+
+  const scheduled = await pool.query(
+    `SELECT id
+     FROM employee_work_schedules
+     WHERE user_id = $1
+       AND project_id = $2
+       AND work_date = CURRENT_DATE
+       AND status <> 'CANCELLED'
+     LIMIT 1`,
+    [userId, projectId]
+  );
+  if (scheduled.rowCount === 0) {
     return { ok: false, message: "Employee is not assigned to this project" };
   }
   return { ok: true };

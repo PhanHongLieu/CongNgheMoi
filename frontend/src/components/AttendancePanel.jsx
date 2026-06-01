@@ -1194,8 +1194,9 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
       </div>
 
       {scanVisible && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl border border-steel/15 bg-white p-4 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden bg-black/60 p-2 sm:items-center sm:p-4">
+          <div className="flex max-h-[calc(100dvh-16px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-steel/15 bg-white shadow-2xl sm:max-h-[90vh]">
+            <div className="shrink-0 p-4 pb-2">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="font-semibold text-steel">Face Scan & GPS Integration</h3>
               <div className="flex items-center gap-2">
@@ -1217,16 +1218,18 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
               </div>
             </div>
             {statusBanner}
+            </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid flex-1 gap-4 overflow-y-auto px-4 pb-4 md:grid-cols-2">
               <div>
-                <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">
+                <div className="relative h-[min(58vw,280px)] min-h-[220px] overflow-hidden rounded-xl bg-slate-900 sm:aspect-video sm:h-auto sm:min-h-0">
                   <video
                     ref={videoRef}
                     onPlay={handleVideoPlay}
                     autoPlay
+                    muted
                     playsInline
-                    className={`h-full w-full -scale-x-100 object-cover ${streaming ? "" : "hidden"}`}
+                    className={`absolute inset-0 h-full w-full -scale-x-100 object-cover ${streaming ? "" : "hidden"}`}
                   />
                   {!streaming && (
                     <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-300">
@@ -1254,7 +1257,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
                 )}
               </div>
 
-              <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+              <div className="rounded-2xl border border-steel/15 bg-white p-3 shadow-soft sm:p-4">
               <h3 className="mb-3 font-semibold text-steel">GPS Integration</h3>
               <p className="mb-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">
                 GPS is prefetched in background and frozen when you tap Check-in/Check-out.
@@ -1262,7 +1265,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
 
                 {selectedProjectData && selectedProjectData.latitude && selectedProjectData.longitude ? (
                   <div className="mt-3">
-                    <div className="h-44 rounded-xl overflow-hidden border border-steel/15">
+                    <div className="h-28 overflow-hidden rounded-xl border border-steel/15 sm:h-44">
                     <MapContainer
                       center={[selectedProjectData.latitude, selectedProjectData.longitude]}
                       zoom={16}
@@ -1337,7 +1340,8 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
               </div>
             </div>
 
-            <div className="sticky bottom-0 mt-4 flex items-center justify-end gap-2 border-t border-steel/10 bg-white/95 pt-3 pb-1 backdrop-blur">
+            <div className="shrink-0 border-t border-steel/10 bg-white/95 px-4 py-3 backdrop-blur">
+            <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={closeScanModal}
@@ -1353,6 +1357,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
               >
                 {scanBusy ? "Processing..." : scanType === "out" ? "Confirm Check-out" : "Confirm Check-in"}
               </button>
+            </div>
             </div>
           </div>
         </div>
