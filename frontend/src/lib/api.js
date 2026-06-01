@@ -26,6 +26,17 @@ function emitAuthInvalid(message) {
   );
 }
 
+function normalizeApiErrorMessage(data, raw, response) {
+  if (data && typeof data === "object" && data.message) {
+    return data.message;
+  }
+  const text = String(raw || data || "").trim();
+  if (text.startsWith("<!DOCTYPE") || text.startsWith("<html") || response.status === 502) {
+    return `Service unavailable (${response.status}). Please check backend deployment logs.`;
+  }
+  return text || `Request failed (${response.status})`;
+}
+
 export async function apiRequest(path, token, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const shouldToast = options.toast !== false && method !== "GET";
@@ -54,7 +65,7 @@ export async function apiRequest(path, token, options = {}) {
   }
 
   if (!response.ok) {
-    const message = (data && data.message) || raw || "Request failed";
+    const message = normalizeApiErrorMessage(data, raw, response);
     if (response.status === 401) {
       emitAuthInvalid(message);
     }

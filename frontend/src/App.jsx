@@ -351,6 +351,12 @@ export default function App() {
       });
       if (faceVideoRef.current) {
         faceVideoRef.current.srcObject = stream;
+        faceVideoRef.current.onloadedmetadata = () => {
+          if (faceVideoRef.current && faceOverlayRef.current) {
+            faceOverlayRef.current.width = faceVideoRef.current.videoWidth || 1280;
+            faceOverlayRef.current.height = faceVideoRef.current.videoHeight || 720;
+          }
+        };
         try {
           await faceVideoRef.current.play();
         } catch {
@@ -1117,8 +1123,8 @@ export default function App() {
       )}
 
       {faceEnrollOpen && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-4xl rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="fixed inset-0 z-[200] overflow-y-auto bg-black/70 p-3 sm:flex sm:items-center sm:justify-center sm:p-4">
+          <div className="mx-auto my-3 w-full max-w-4xl rounded-2xl bg-white p-4 shadow-2xl sm:my-6 sm:p-6">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
               <h3 className="text-xl font-bold text-steel">Face Enrollment</h3>
@@ -1133,9 +1139,9 @@ export default function App() {
 
             <div className="space-y-3">
               <div className="rounded-xl border border-steel/15 bg-steel/5 p-3">
-                <div className="relative aspect-video overflow-hidden rounded-lg bg-slate-900">
-                  <video ref={faceVideoRef} autoPlay playsInline className={`h-full w-full -scale-x-100 object-cover ${faceEnrollStreaming ? "" : "hidden"}`} />
-                  <canvas ref={faceOverlayRef} className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 ${faceEnrollStreaming ? "" : "hidden"}`} />
+                <div className="relative min-h-[360px] overflow-hidden rounded-lg bg-slate-900 sm:aspect-video sm:min-h-0">
+                  <video ref={faceVideoRef} autoPlay muted playsInline className={`absolute inset-0 h-full w-full -scale-x-100 object-cover ${faceEnrollStreaming ? "" : "hidden"}`} />
+                  <canvas ref={faceOverlayRef} className={`pointer-events-none absolute inset-0 z-20 h-full w-full -scale-x-100 ${faceEnrollStreaming ? "" : "hidden"}`} />
                   {!faceEnrollStreaming && (
                     <div className="flex h-full items-center justify-center text-slate-400">
                       Camera unavailable
@@ -1143,17 +1149,19 @@ export default function App() {
                   )}
                   {faceEnrollStreaming && (
                     <>
-                      <div className="pointer-events-none absolute inset-0 border-2 border-emerald-300/60" />
-                      <div className="pointer-events-none absolute inset-x-6 top-1/2 h-0.5 -translate-y-1/2 bg-emerald-300/90 shadow-[0_0_14px_rgba(16,185,129,0.9)] animate-pulse" />
-                      <div className="absolute left-3 top-3 rounded-lg bg-black/55 px-3 py-2 text-white">
+                      <div className="pointer-events-none absolute inset-0 z-10 border-2 border-emerald-300/70" />
+                      <div className="pointer-events-none absolute inset-4 z-10 rounded-[28px] border border-emerald-200/50" />
+                      <div className="pointer-events-none absolute inset-0 z-10 bg-[linear-gradient(rgba(16,185,129,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(16,185,129,0.18)_1px,transparent_1px)] bg-[size:36px_36px]" />
+                      <div className="pointer-events-none absolute inset-x-6 top-1/2 z-10 h-0.5 -translate-y-1/2 bg-emerald-300/90 shadow-[0_0_14px_rgba(16,185,129,0.9)] animate-pulse" />
+                      <div className="absolute left-3 right-3 top-3 z-30 rounded-lg bg-black/65 px-3 py-2 text-white sm:right-auto sm:max-w-sm">
                         <p className="text-xs font-semibold uppercase tracking-wider text-emerald-200">Auto Face Scan</p>
                         <p className="text-sm font-bold">{FACE_ENROLL_STEPS[faceEnrollStep].label}</p>
                         <p className="text-xs text-white/90">{FACE_ENROLL_STEPS[faceEnrollStep].hint}</p>
                       </div>
-                      <div className="absolute right-3 top-3 rounded-full bg-black/55 px-3 py-1 text-xs font-semibold text-white">
+                      <div className="absolute right-3 bottom-14 z-30 rounded-full bg-black/65 px-3 py-1 text-xs font-semibold text-white sm:top-3 sm:bottom-auto">
                         {Object.keys(faceEnrollCaptures).length}/{FACE_ENROLL_STEPS.length}
                       </div>
-                      <div className={`absolute right-3 bottom-3 rounded-full px-3 py-1 text-xs font-semibold ${faceModelsLoaded ? "bg-emerald-500/80 text-white" : "bg-amber-500/80 text-white"}`}>
+                      <div className={`absolute right-3 bottom-3 z-30 rounded-full px-3 py-1 text-xs font-semibold ${faceModelsLoaded ? "bg-emerald-500/80 text-white" : "bg-amber-500/80 text-white"}`}>
                         {faceModelsLoaded ? "Models ready" : "Loading models"}
                       </div>
                     </>
