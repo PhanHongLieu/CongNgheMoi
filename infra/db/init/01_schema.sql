@@ -303,10 +303,12 @@ CREATE TABLE IF NOT EXISTS projects (
   start_date DATE,
   end_date DATE,
   status VARCHAR(30) NOT NULL DEFAULT 'PLANNING',
+  progress_percent NUMERIC(6,2) NOT NULL DEFAULT 0,
   gps_radius_meters INTEGER NOT NULL DEFAULT 100 CHECK (gps_radius_meters BETWEEN 30 AND 2000),
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS progress_percent NUMERIC(6,2) NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS gps_radius_meters INTEGER NOT NULL DEFAULT 100;
 ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_gps_radius_meters_check;
 ALTER TABLE projects ADD CONSTRAINT projects_gps_radius_meters_check CHECK (gps_radius_meters BETWEEN 30 AND 2000);

@@ -45,6 +45,7 @@ const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || process.env.MINIO_ROOT_
 const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || process.env.MINIO_ROOT_PASSWORD || "mdp_minio_password";
 const MINIO_BUCKET = process.env.MINIO_BUCKET || "face-enrollments";
 const MINIO_PUBLIC_BASE_URL = process.env.MINIO_PUBLIC_BASE_URL || "http://localhost:9000";
+const MINIO_ENABLED = String(process.env.MINIO_ENABLED || "true").toLowerCase() !== "false";
 
 app.use(helmet());
 app.use(cors());
@@ -110,9 +111,11 @@ async function ensureFaceEnrollmentSchema() {
     WHERE face_enrollment_status IS NULL
        OR face_enrollment_status NOT IN ('UNREGISTERED', 'PENDING', 'APPROVED', 'REJECTED')
   `);
-  const exists = await minioClient.bucketExists(MINIO_BUCKET).catch(() => false);
-  if (!exists) {
-    await minioClient.makeBucket(MINIO_BUCKET, "us-east-1");
+  if (MINIO_ENABLED) {
+    const exists = await minioClient.bucketExists(MINIO_BUCKET).catch(() => false);
+    if (!exists) {
+      await minioClient.makeBucket(MINIO_BUCKET, "us-east-1");
+    }
   }
 }
 
@@ -1289,8 +1292,23 @@ app.post("/users/:id/face-enrollment/samples-upload", authenticate, authorize("H
     }
 
     const parsedEntries = Object.entries(samples)
-      .map(([step, dataUrl]) => ({ step, parsed: parseDataUrl(dataUrl) }))
+      .map(([step, dataUrl]) => ({ step, dataUrl, parsed: parseDataUrl(dataUrl) }))
       .filter((item) => Boolean(item.parsed));
+
+    if (!MINIO_ENABLED) {
+      const sampleUrls = Object.fromEntries(parsedEntries.map((item) => [item.step, item.dataUrl]));
+      if (Object.keys(sampleUrls).length === 0) {
+        return res.status(400).json({ message: "No valid image samples to upload" });
+      }
+      await writeDataLog({
+        action: "create",
+        collection: "face-enrollment-samples",
+        recordId: String(userId),
+        username: req.user.email,
+        metadata: { uploadedSteps: Object.keys(sampleUrls), storage: "database" }
+      });
+      return res.json({ message: "Face samples stored in enrollment payload", sampleUrls });
+    }
 
     const uploaded = await Promise.all(
       parsedEntries.map(async ({ step, parsed }, index) => {
