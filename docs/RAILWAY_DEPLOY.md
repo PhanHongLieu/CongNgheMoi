@@ -79,6 +79,8 @@ REQUEST_SERVICE_URL=http://mdp-request-service.railway.internal:3006
 
 Only expose a public domain for `mdp-gateway` and `mdp-frontend`. The internal services can stay private.
 
+If a backend fails with `Deployment failed during the network process`, check that it does not have a public domain or healthcheck configured. The backend `railway.toml` files intentionally do not define `healthcheckPath`; keep healthchecks only on `mdp-gateway` and `mdp-frontend` while deploying the first version.
+
 ## 5. Frontend variables
 
 After `mdp-gateway` has a public Railway domain, set these on `mdp-frontend`:
@@ -143,9 +145,20 @@ Use the Railway PostgreSQL public connection string or TCP proxy connection stri
 ## 8. Deploy order
 
 1. PostgreSQL
-2. Backend services
-3. Gateway
-4. Frontend
-5. MinIO, if needed
-6. Import schema
-7. Redeploy backend services if schema-dependent startup failed before import
+2. Import schema
+3. Backend services without public domains
+4. Gateway with public domain
+5. Frontend with public domain
+6. MinIO, if needed
+7. Redeploy frontend after setting `VITE_API_BASE`
+
+## 9. Railway network failure checklist
+
+If Railway shows `Deployment failed during the network process`:
+
+1. Open the failed service -> Deployments -> View logs.
+2. If the log says `Healthcheck failure`, remove `Healthcheck Path` from that backend service.
+3. If the log says the app did not respond on `$PORT`, set the service variable `PORT` to the value in the table above.
+4. If the log says `listen EADDRINUSE`, remove duplicate custom `PORT` values in that same service.
+5. If the backend exits because database tables do not exist, import `infra/db/init/01_schema.sql` into Railway PostgreSQL, then redeploy.
+6. If the failed service is `mdp-gateway`, confirm all `*_SERVICE_URL` variables use `.railway.internal` and the correct ports.
