@@ -463,7 +463,10 @@ export default function App() {
     const authInvalidHandler = () => {
       setToken("");
       setProfile(null);
-      setAccountModalOpen(false);
+      setAccountMenuOpen(false);
+      setProfileModalOpen(false);
+      setPasswordModalOpen(false);
+      setLogoutModalOpen(false);
       localStorage.removeItem("mdp_access_token");
       localStorage.removeItem("mdp_profile");
       setMessage("Session expired. Please sign in again.");

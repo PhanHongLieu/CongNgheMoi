@@ -74,6 +74,8 @@ RECAPTCHA_MIN_SCORE=0.5
 MINIO_ENABLED=false
 ```
 
+Quan trong: `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, va `TOKEN_ISSUER` phai giong nhau tren tat ca backend service. Neu auth-service dung mot secret de cap token, nhung user-service/project-service/notification-service dung secret khac de verify token, frontend se dang nhap thanh cong roi bi day ve man hinh login ngay sau do.
+
 Render tu cap bien `PORT`, khong can tu set `PORT`.
 
 ## 4. Bien moi truong cho gateway
@@ -146,6 +148,47 @@ Neu gateway tra HTML `Cannot GET /api/...`:
 
 - Kiem tra `*_SERVICE_URL` cua gateway.
 - Kiem tra backend service tuong ung co chay khong.
+
+Neu login tra HTML `502 Bad Gateway` cua Render:
+
+- Day khong phai loi form login. Day la loi service Render dang down, crash, sleep/boot qua lau, hoac gateway proxy toi backend dang loi.
+- Mo truc tiep gateway health:
+
+```txt
+https://<gateway-render-url>/health
+```
+
+- Neu `/health` cung 502, vao Render service `mdp-gateway` -> Logs de xem gateway co crash khong.
+- Neu `/health` OK, mo auth-service health:
+
+```txt
+https://<auth-service-render-url>/health
+```
+
+- Neu auth-service 502, vao Render service `mdp-auth-service` -> Logs. Thuong la thieu `DATABASE_URL`, sai `DATABASE_SSL=true`, chua import schema, hoac service deploy sai root directory.
+- Neu ca gateway va auth-service `/health` deu OK, kiem tra bien tren frontend:
+
+```env
+VITE_API_BASE=https://<gateway-render-url>/api
+```
+
+- Kiem tra bien tren gateway:
+
+```env
+AUTH_SERVICE_URL=https://<auth-service-render-url>
+USER_SERVICE_URL=https://<user-service-render-url>
+PROJECT_SERVICE_URL=https://<project-service-render-url>
+ATTENDANCE_SERVICE_URL=https://<attendance-service-render-url>
+NOTIFICATION_SERVICE_URL=https://<notification-service-render-url>
+REQUEST_SERVICE_URL=https://<request-service-render-url>
+```
+
+Neu login bao thanh cong roi tu dong out:
+
+- Kiem tra `JWT_ACCESS_SECRET` tren tat ca backend service co giong nhau khong.
+- Kiem tra `TOKEN_ISSUER` tren tat ca backend service deu la `mdp-system`.
+- Sau khi sua env tren Render, redeploy tat ca backend service.
+- Trinh tu toi thieu can redeploy: `mdp-auth-service`, `mdp-user-service`, `mdp-project-service`, `mdp-attendance-service`, `mdp-notification-service`, `mdp-request-service`, sau do `mdp-gateway`.
 
 Neu backend loi database:
 
