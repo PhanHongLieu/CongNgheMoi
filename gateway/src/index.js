@@ -87,6 +87,58 @@ app.get("/health/upstreams", (req, res) => {
   });
 });
 
+app.get("/health/upstreams/check", async (req, res) => {
+  const upstreams = {
+    authService,
+    userService,
+    projectService,
+    attendanceService,
+    notificationService,
+    requestService,
+    aiService
+  };
+
+  const results = await Promise.all(
+    Object.entries(upstreams).map(async ([name, target]) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        const response = await fetch(`${target}/health`, { signal: controller.signal });
+        const raw = await response.text();
+        let body = raw;
+        try {
+          body = raw ? JSON.parse(raw) : null;
+        } catch {
+          body = raw.slice(0, 500);
+        }
+        return {
+          name,
+          target,
+          ok: response.ok,
+          status: response.status,
+          body
+        };
+      } catch (error) {
+        return {
+          name,
+          target,
+          ok: false,
+          status: null,
+          error: error.name === "AbortError" ? "Health check timed out" : error.message
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    })
+  );
+
+  res.json({
+    service: "api-gateway",
+    ok: results.every((item) => item.ok),
+    results
+  });
+});
+
 proxyRoute("/api/auth", authService);
 proxyRoute("/api/audit", userService);
 proxyRoute("/api/system", userService);
