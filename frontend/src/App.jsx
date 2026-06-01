@@ -263,7 +263,7 @@ export default function App() {
       const response = await fetch(`${API_BASE}/notifications`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Failed to load notifications");
       }
@@ -282,7 +282,7 @@ export default function App() {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Failed to update notification");
       }
@@ -546,7 +546,7 @@ export default function App() {
         const response = await fetch(`${API_BASE}/users/${profile.id}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
-        const data = await response.json();
+        const data = await readApiResponse(response);
         if (!response.ok) {
           throw new Error(data?.message || "Unable to check face registration");
         }
@@ -717,7 +717,7 @@ export default function App() {
       const response = await fetch(`${API_BASE}/users/${profile.id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Failed to fetch profile");
       }
@@ -799,7 +799,7 @@ export default function App() {
           profileImageUrl: profileForm.profileImageUrl || null
         })
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Profile update failed");
       }
@@ -847,7 +847,7 @@ export default function App() {
           newPassword: passwordForm.newPassword
         })
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Password change failed");
       }
@@ -922,7 +922,7 @@ export default function App() {
         },
         body: JSON.stringify({ samples: optimizedSamples })
       });
-      const uploadData = await uploadResponse.json();
+      const uploadData = await readApiResponse(uploadResponse);
       if (!uploadResponse.ok) {
         throw new Error(uploadData?.message || "Failed to upload face samples");
       }
@@ -937,7 +937,7 @@ export default function App() {
         },
         body: JSON.stringify({ faceTemplate: JSON.stringify(payload) })
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         throw new Error(data?.message || "Face registration failed");
       }

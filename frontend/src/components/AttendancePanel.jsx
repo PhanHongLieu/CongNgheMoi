@@ -37,6 +37,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readApiResponse(response) {
+  const raw = await response.text();
+  let data = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    const text = String(raw || "").trim();
+    const contentType = response.headers.get("content-type") || "";
+    const isHtml = contentType.includes("text/html") || text.includes("<!DOCTYPE") || text.includes("<html");
+    data = {
+      message: isHtml || response.status === 502
+        ? `Service unavailable (${response.status}). Please check backend deployment logs.`
+        : text || `Request failed (${response.status})`
+    };
+  }
+  return data;
+}
+
 function dominantExpression(expressions) {
   if (!expressions || typeof expressions !== "object") {
     return { key: "unknown", score: 0 };
@@ -142,7 +160,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
       const response = await fetch(`${API_BASE}/attendance/history`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) {
         return;
       }
@@ -243,8 +261,8 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
             headers: { Authorization: `Bearer ${token}` }
           })
         ]);
-        const todayData = await todayResponse.json();
-        const scheduleData = await scheduleResponse.json();
+        const todayData = await readApiResponse(todayResponse);
+        const scheduleData = await readApiResponse(scheduleResponse);
         const projectList = Array.isArray(scheduleData) ? scheduleData : [];
         // Transform schedule data to match expected project structure
         const transformedProjects = projectList.map(item => ({
@@ -854,7 +872,7 @@ export default function AttendancePanel({ token, profile, faceEnrollmentStatus }
         body: JSON.stringify(payload)
       });
 
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (isCancelled()) return false;
       if (!response.ok) {
         if (String(data.message || "").toLowerCase().includes("liveness")) {
