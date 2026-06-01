@@ -10,6 +10,8 @@ const port = Number(process.env.PORT || process.env.GATEWAY_PORT || 8080);
 app.use(helmet());
 app.use(cors());
 const MAX_BODY_SIZE_BYTES = 15 * 1024 * 1024;
+const KEEP_ALIVE_ENABLED = String(process.env.KEEP_ALIVE_ENABLED || "true").toLowerCase() !== "false";
+const KEEP_ALIVE_INTERVAL_MS = Number(process.env.KEEP_ALIVE_INTERVAL_MS || 8 * 60 * 1000);
 app.use((req, res, next) => {
   const lengthHeader = req.headers["content-length"];
   if (!lengthHeader) {
@@ -72,23 +74,8 @@ const notificationService = serviceTarget("NOTIFICATION_SERVICE", "notification-
 const requestService = serviceTarget("REQUEST_SERVICE", "request-service", 3006);
 const aiService = serviceTarget("AI_SERVICE", "ai-service", 3007);
 
-app.get("/health/upstreams", (req, res) => {
-  res.json({
-    service: "api-gateway",
-    upstreams: {
-      authService,
-      userService,
-      projectService,
-      attendanceService,
-      notificationService,
-      requestService,
-      aiService
-    }
-  });
-});
-
-app.get("/health/upstreams/check", async (req, res) => {
-  const upstreams = {
+function upstreamMap() {
+  return {
     authService,
     userService,
     projectService,
@@ -97,43 +84,68 @@ app.get("/health/upstreams/check", async (req, res) => {
     requestService,
     aiService
   };
+}
 
-  const results = await Promise.all(
-    Object.entries(upstreams).map(async ([name, target]) => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
-      try {
-        const response = await fetch(`${target}/health`, { signal: controller.signal });
-        const raw = await response.text();
-        let body = raw;
-        try {
-          body = raw ? JSON.parse(raw) : null;
-        } catch {
-          body = raw.slice(0, 500);
-        }
-        return {
-          name,
-          target,
-          ok: response.ok,
-          status: response.status,
-          body
-        };
-      } catch (error) {
-        return {
-          name,
-          target,
-          ok: false,
-          status: null,
-          error: error.name === "AbortError" ? "Health check timed out" : error.message
-        };
-      } finally {
-        clearTimeout(timeout);
-      }
-    })
+async function checkUpstream(name, target, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${target}/health`, { signal: controller.signal });
+    const raw = await response.text();
+    let body = raw;
+    try {
+      body = raw ? JSON.parse(raw) : null;
+    } catch {
+      body = raw.slice(0, 500);
+    }
+    return {
+      name,
+      target,
+      ok: response.ok,
+      status: response.status,
+      body
+    };
+  } catch (error) {
+    return {
+      name,
+      target,
+      ok: false,
+      status: null,
+      error: error.name === "AbortError" ? "Health check timed out" : error.message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkAllUpstreams(timeoutMs = 12000) {
+  return Promise.all(
+    Object.entries(upstreamMap()).map(([name, target]) => checkUpstream(name, target, timeoutMs))
   );
+}
+
+app.get("/health/upstreams", (req, res) => {
+  res.json({
+    service: "api-gateway",
+    upstreams: upstreamMap()
+  });
+});
+
+app.get("/health/upstreams/check", async (req, res) => {
+  const results = await checkAllUpstreams();
 
   res.json({
     service: "api-gateway",
+    ok: results.every((item) => item.ok),
+    results
+  });
+});
+
+app.get("/health/warmup", async (req, res) => {
+  const results = await checkAllUpstreams(20000);
+  res.json({
+    service: "api-gateway",
+    warmedAt: new Date().toISOString(),
     ok: results.every((item) => item.ok),
     results
   });
@@ -152,4 +164,18 @@ proxyRoute("/api/ai", aiService);
 
 app.listen(port, () => {
   console.log(`api-gateway listening on ${port}`);
+  if (KEEP_ALIVE_ENABLED && Number.isFinite(KEEP_ALIVE_INTERVAL_MS) && KEEP_ALIVE_INTERVAL_MS >= 60000) {
+    setInterval(() => {
+      checkAllUpstreams(20000)
+        .then((results) => {
+          const failed = results.filter((item) => !item.ok).map((item) => `${item.name}:${item.status || item.error}`);
+          if (failed.length > 0) {
+            console.warn(`[keep-alive] upstream issues: ${failed.join(", ")}`);
+          } else {
+            console.log("[keep-alive] upstreams warm");
+          }
+        })
+        .catch((error) => console.warn(`[keep-alive] failed: ${error.message}`));
+    }, KEEP_ALIVE_INTERVAL_MS);
+  }
 });

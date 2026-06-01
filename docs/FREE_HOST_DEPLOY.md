@@ -100,6 +100,8 @@ ATTENDANCE_SERVICE_URL=https://mdp-attendance-service.onrender.com
 NOTIFICATION_SERVICE_URL=https://mdp-notification-service.onrender.com
 REQUEST_SERVICE_URL=https://mdp-request-service.onrender.com
 AI_SERVICE_URL=https://mdp-ai-service.onrender.com
+KEEP_ALIVE_ENABLED=true
+KEEP_ALIVE_INTERVAL_MS=480000
 ```
 
 Thay dung URL that Render cap cho service cua ban.
@@ -136,6 +138,29 @@ VITE_RECAPTCHA_ACTION=login
 ```
 
 Sau khi set bien moi truong, redeploy frontend.
+
+## 5.1. Giam loi 502 do Render free sleep
+
+Render free co the sleep khi khong co request. Khi service vua thuc day, request dau tien co the cham hoac 502.
+
+He thong da co 2 lop warm-up:
+
+- Frontend tu goi gateway `/health/warmup` khi nguoi dung mo app va moi 4 phut khi app dang mo.
+- Gateway tu goi `/health` cua cac service con khi dang thuc.
+
+Neu muon han che 502 ca khi khong co ai mo app, dung mot uptime monitor ben ngoai ping URL nay moi 5 phut:
+
+```txt
+https://mdp-gateway.onrender.com/health/warmup
+```
+
+Kiem tra trang thai toan bo service:
+
+```txt
+https://mdp-gateway.onrender.com/health/upstreams/check
+```
+
+Neu can het 502 gan nhu tuyet doi, Render backend nen chuyen sang paid instance hoac gom backend lai thanh mot service it ngu hon.
 
 ## 6. Thu tu deploy
 

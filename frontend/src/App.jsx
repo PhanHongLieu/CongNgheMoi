@@ -182,6 +182,18 @@ async function readApiResponse(response) {
   return data;
 }
 
+function getGatewayBaseUrl() {
+  return API_BASE.replace(/\/api\/?$/, "");
+}
+
+async function warmupBackend() {
+  try {
+    await fetch(`${getGatewayBaseUrl()}/health/warmup`, { cache: "no-store" });
+  } catch {
+    // Warm-up is best-effort; normal API calls still report concrete errors.
+  }
+}
+
 function BellIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -477,6 +489,23 @@ export default function App() {
       localStorage.removeItem("mdp_access_token");
       localStorage.removeItem("mdp_profile");
     }
+  }, []);
+
+  useEffect(() => {
+    warmupBackend();
+    const timer = window.setInterval(warmupBackend, 4 * 60 * 1000);
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        warmupBackend();
+      }
+    };
+    window.addEventListener("focus", warmupBackend);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", warmupBackend);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
