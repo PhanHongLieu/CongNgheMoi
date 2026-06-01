@@ -28,7 +28,7 @@ app.get("/health", (req, res) => {
 
 function serviceTarget(key, fallbackHost, fallbackPort) {
   const explicitUrl = process.env[`${key}_URL`];
-  if (explicitUrl) return explicitUrl;
+  if (explicitUrl) return explicitUrl.replace(/\/+$/, "");
 
   const host = process.env[`${key}_HOST`] || fallbackHost;
   const servicePort = process.env[`${key}_PORT`] || fallbackPort;
@@ -43,7 +43,23 @@ function proxyRoute(path, target) {
     createProxyMiddleware({
       target,
       changeOrigin: true,
+      proxyTimeout: 30000,
+      timeout: 30000,
       pathRewrite: (incomingPath) => `${serviceBasePath}${incomingPath}`
+      ,
+      on: {
+        error: (error, req, res) => {
+          console.error(`[proxy-error] ${req.method} ${path}${req.url} -> ${target}: ${error.message}`);
+          if (!res.headersSent) {
+            res.status(502).json({
+              message: "Gateway could not reach upstream service",
+              upstream: target,
+              route: path,
+              error: error.message
+            });
+          }
+        }
+      }
     })
   );
 }
@@ -55,6 +71,21 @@ const attendanceService = serviceTarget("ATTENDANCE_SERVICE", "attendance-servic
 const notificationService = serviceTarget("NOTIFICATION_SERVICE", "notification-service", 3005);
 const requestService = serviceTarget("REQUEST_SERVICE", "request-service", 3006);
 const aiService = serviceTarget("AI_SERVICE", "ai-service", 3007);
+
+app.get("/health/upstreams", (req, res) => {
+  res.json({
+    service: "api-gateway",
+    upstreams: {
+      authService,
+      userService,
+      projectService,
+      attendanceService,
+      notificationService,
+      requestService,
+      aiService
+    }
+  });
+});
 
 proxyRoute("/api/auth", authService);
 proxyRoute("/api/audit", userService);
