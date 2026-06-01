@@ -28,7 +28,7 @@ function emitAuthInvalid(message) {
 
 function normalizeApiErrorMessage(data, raw, response) {
   if (data && typeof data === "object" && data.message) {
-    return data.message;
+    return data.error ? `${data.message}: ${data.error}` : data.message;
   }
   const text = String(raw || data || "").trim();
   if (text.startsWith("<!DOCTYPE") || text.startsWith("<html") || response.status === 502) {

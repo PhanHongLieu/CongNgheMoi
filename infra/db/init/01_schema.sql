@@ -487,7 +487,7 @@ CREATE TABLE IF NOT EXISTS salaries (
   deductions DECIMAL(10,2) DEFAULT 0,
   total_salary DECIMAL(10,2) NOT NULL,
   payment_date DATE,
-  status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID', 'CANCELLED')),
+  status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'LOCKED', 'PAID', 'CANCELLED')),
   notes TEXT,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),

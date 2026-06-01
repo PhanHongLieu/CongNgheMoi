@@ -1898,6 +1898,14 @@ app.post("/users/salary/finalize", authenticate, authorize("HR_MANAGER"), async 
     if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
       return res.status(400).json({ message: "month/year are invalid" });
     }
+    await ensureSalarySchema();
+    const existing = await pool.query(
+      "SELECT COUNT(*)::int AS total FROM salaries WHERE month = $1 AND year = $2",
+      [month, year]
+    );
+    if (Number(existing.rows[0]?.total || 0) === 0) {
+      return res.status(404).json({ message: "No salary records found for selected period. Please calculate salary data before finalizing payroll." });
+    }
     const result = await pool.query(
       `UPDATE salaries
        SET status = 'LOCKED',
@@ -1954,6 +1962,10 @@ async function ensureSalarySchema() {
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS base_monthly_salary NUMERIC(14,2) NOT NULL DEFAULT 0");
   await pool.query(`UPDATE users SET base_monthly_salary = ROUND(COALESCE(base_monthly_salary, 0), 2)`);
   await pool.query(`UPDATE users SET base_monthly_salary = ROUND(COALESCE(hourly_rate, ${DEFAULT_HOURLY_RATE}) * ${DEFAULT_MONTHLY_STANDARD_HOURS}, 2) WHERE COALESCE(base_monthly_salary, 0) <= 0`);
+  await pool.query("ALTER TABLE salaries ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'PENDING'");
+  await pool.query("ALTER TABLE salaries ADD COLUMN IF NOT EXISTS payment_date DATE");
+  await pool.query("ALTER TABLE salaries DROP CONSTRAINT IF EXISTS salaries_status_check");
+  await pool.query("ALTER TABLE salaries ADD CONSTRAINT salaries_status_check CHECK (status IN ('PENDING', 'LOCKED', 'PAID', 'CANCELLED'))");
   await pool.query(
     `CREATE TABLE IF NOT EXISTS salary_month_settings (
       id SERIAL PRIMARY KEY,
