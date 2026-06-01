@@ -116,6 +116,18 @@ async function ensureFaceEnrollmentSchema() {
     if (!exists) {
       await minioClient.makeBucket(MINIO_BUCKET, "us-east-1");
     }
+    const publicReadPolicy = {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Principal: { AWS: ["*"] },
+          Action: ["s3:GetObject"],
+          Resource: [`arn:aws:s3:::${MINIO_BUCKET}/*`]
+        }
+      ]
+    };
+    await minioClient.setBucketPolicy(MINIO_BUCKET, JSON.stringify(publicReadPolicy));
   }
 }
 

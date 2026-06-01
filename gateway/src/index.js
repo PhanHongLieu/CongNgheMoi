@@ -54,6 +54,7 @@ const projectService = serviceTarget("PROJECT_SERVICE", "project-service", 3003)
 const attendanceService = serviceTarget("ATTENDANCE_SERVICE", "attendance-service", 3004);
 const notificationService = serviceTarget("NOTIFICATION_SERVICE", "notification-service", 3005);
 const requestService = serviceTarget("REQUEST_SERVICE", "request-service", 3006);
+const aiService = serviceTarget("AI_SERVICE", "ai-service", 3007);
 
 proxyRoute("/api/auth", authService);
 proxyRoute("/api/audit", userService);
@@ -64,6 +65,7 @@ proxyRoute("/api/projects", projectService);
 proxyRoute("/api/attendance", attendanceService);
 proxyRoute("/api/requests", requestService);
 proxyRoute("/api/notifications", notificationService);
+proxyRoute("/api/ai", aiService);
 
 app.listen(port, () => {
   console.log(`api-gateway listening on ${port}`);

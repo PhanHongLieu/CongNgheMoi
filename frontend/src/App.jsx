@@ -3,6 +3,7 @@ import AdminWorkspace from "./components/workspaces/AdminWorkspace";
 import EmployeeWorkspace from "./components/workspaces/EmployeeWorkspace";
 import ManagerWorkspace from "./components/workspaces/ManagerWorkspace";
 import SystemAdminWorkspace from "./components/workspaces/SystemAdminWorkspace";
+import AiChatbox from "./components/AiChatbox";
 import { getTranslation } from "./i18n";
 import * as faceapi from "face-api.js";
 import {
@@ -1242,6 +1243,7 @@ export default function App() {
           {renderDashboardByRole()}
         </div>
       )}
+      {token && <AiChatbox token={token} profile={profile} />}
     </main>
   );
 }

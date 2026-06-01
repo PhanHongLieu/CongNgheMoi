@@ -7,7 +7,8 @@ Kien truc free de lam do an:
 - Frontend: Vercel free
 - Backend: Render free Web Services
 - Database: Supabase free Postgres
-- MinIO: bo qua trong ban free, face enrollment se luu anh mau vao database o dang data URL rut gon
+- Object storage: MinIO tren Railway co volume neu can upload anh face enrollment
+- AI Chatbox: Render free Web Service rieng, goi OpenAI API tu backend
 
 Luu y: host free co gioi han. Render free service co the sleep khi khong co request, lan truy cap dau co the cham. Supabase free co gioi han dung luong va co the pause neu khong su dung trong thoi gian dai.
 
@@ -51,6 +52,7 @@ Khong dung Blueprint. Tao tung service thu cong tu cung GitHub repo.
 | `mdp-attendance-service` | `services/attendance-service` | Docker | `Dockerfile` |
 | `mdp-notification-service` | `services/notification-service` | Docker | `Dockerfile` |
 | `mdp-request-service` | `services/request-service` | Docker | `Dockerfile` |
+| `mdp-ai-service` | `services/ai-service` | Docker | `Dockerfile` |
 | `mdp-gateway` | `gateway` | Docker | `Dockerfile` |
 
 Chon plan free cho tung service.
@@ -78,9 +80,17 @@ Quan trong: `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, va `TOKEN_ISSUER` phai gi
 
 Render tu cap bien `PORT`, khong can tu set `PORT`.
 
+Rieng `mdp-ai-service`, them cac bien AI:
+
+```env
+AI_PROVIDER=openai
+AI_MODEL=gpt-4o-mini
+OPENAI_API_KEY=<OpenAI API key cua ban>
+```
+
 ## 4. Bien moi truong cho gateway
 
-Sau khi 6 backend service co URL, them vao `mdp-gateway`:
+Sau khi cac backend service co URL, them vao `mdp-gateway`:
 
 ```env
 AUTH_SERVICE_URL=https://mdp-auth-service.onrender.com
@@ -89,6 +99,7 @@ PROJECT_SERVICE_URL=https://mdp-project-service.onrender.com
 ATTENDANCE_SERVICE_URL=https://mdp-attendance-service.onrender.com
 NOTIFICATION_SERVICE_URL=https://mdp-notification-service.onrender.com
 REQUEST_SERVICE_URL=https://mdp-request-service.onrender.com
+AI_SERVICE_URL=https://mdp-ai-service.onrender.com
 ```
 
 Thay dung URL that Render cap cho service cua ban.
@@ -130,7 +141,7 @@ Sau khi set bien moi truong, redeploy frontend.
 
 1. Tao Supabase Postgres.
 2. Import `infra/db/init/01_schema.sql`.
-3. Deploy 6 backend service tren Render.
+3. Deploy cac backend service tren Render.
 4. Deploy gateway tren Render.
 5. Set `*_SERVICE_URL` cho gateway.
 6. Deploy frontend tren Vercel.
@@ -200,3 +211,84 @@ Neu face enrollment upload loi MinIO:
 
 - Kiem tra cac backend co `MINIO_ENABLED=false`.
 - Ban free khong dung MinIO nen user-service se tra data URL de luu kem face template.
+
+## 8. Neu muon dung MinIO object storage that
+
+MinIO can volume persistent de giu file sau moi lan redeploy/restart. Vi vay khong nen chay MinIO tren host free khong co volume. Neu container bi restart va khong co disk persistent, anh face enrollment se mat.
+
+Co 2 huong kha thi:
+
+### Huong A: MinIO tren Render co Persistent Disk
+
+Luu y: Render persistent disk can paid service. Free web service khong phu hop de chay MinIO ben vung.
+
+Tao service rieng tren Render:
+
+```txt
+Name: mdp-minio
+Runtime: Docker image
+Image: minio/minio:latest
+Start Command: server /data --address ":$PORT" --console-address ":9001"
+Disk Mount Path: /data
+```
+
+Environment cua MinIO:
+
+```env
+MINIO_ROOT_USER=<minio-user>
+MINIO_ROOT_PASSWORD=<minio-password>
+```
+
+Sau khi `mdp-minio` co URL public, sua `mdp-user-service`:
+
+```env
+MINIO_ENABLED=true
+MINIO_ENDPOINT=mdp-minio.onrender.com
+MINIO_PORT=443
+MINIO_USE_SSL=true
+MINIO_ACCESS_KEY=<minio-user>
+MINIO_SECRET_KEY=<minio-password>
+MINIO_BUCKET=face-enrollments
+MINIO_PUBLIC_BASE_URL=https://mdp-minio.onrender.com
+```
+
+Sau do redeploy `mdp-user-service`.
+
+### Huong B: MinIO tren Railway co Volume
+
+Railway ho tro persistent volume. Tao service MinIO tu Docker image:
+
+```txt
+Image: minio/minio:latest
+Start Command: minio server /data --address ":9000" --console-address ":9001"
+Volume Mount Path: /data
+```
+
+Environment cua MinIO:
+
+```env
+PORT=9000
+MINIO_ROOT_USER=<minio-user>
+MINIO_ROOT_PASSWORD=<minio-password>
+```
+
+Sua `mdp-user-service`:
+
+```env
+MINIO_ENABLED=true
+MINIO_ENDPOINT=minio-production-a59e.up.railway.app
+MINIO_PORT=443
+MINIO_USE_SSL=true
+MINIO_ACCESS_KEY=<MINIO_ROOT_USER>
+MINIO_SECRET_KEY=<MINIO_ROOT_PASSWORD>
+MINIO_BUCKET=face-enrollments
+MINIO_PUBLIC_BASE_URL=https://minio-production-a59e.up.railway.app
+```
+
+Neu backend van o Render, phai dung public HTTPS domain cua MinIO nhu tren. Khong dung private host `minio.railway.internal` vi Render khong truy cap duoc mang noi bo Railway.
+
+Luu y: `MINIO_ENDPOINT` chi ghi host, khong ghi `https://`.
+
+### Huong C: Van giu host free
+
+Neu bat buoc free, nen dung object storage S3-compatible co free tier nhu Cloudflare R2 thay vi tu host MinIO server. Khi do can cau hinh theo S3-compatible endpoint hoac chuyen code sang AWS S3 SDK. Day khong phai MinIO server, nhung cung la object storage.

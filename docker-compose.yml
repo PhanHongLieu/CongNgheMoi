@@ -118,6 +118,16 @@ services:
       - "3006:3006"
     logging: *default-logging
 
+  ai-service:
+    build: ./services/ai-service
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3007:3007"
+    logging: *default-logging
+
   gateway:
     build: ./gateway
     env_file: .env
@@ -128,6 +138,7 @@ services:
       - attendance-service
       - request-service
       - notification-service
+      - ai-service
     ports:
       - "8080:8080"
     logging: *default-logging
