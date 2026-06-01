@@ -1,13 +1,14 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import { DndContext, useDraggable, useDroppable } from "@dnd-kit/core";
 import SidebarMenu from "../SidebarMenu";
-import GPSLocationPage from "./ManagerGPSLocation";
-import DiaryPage from "./ManagerDiary";
 import MaterialsPage from "./ManagerMaterials";
 import RequestsManagementPage from "./HRRequests";
 import { apiRequest } from "../../lib/api";
 import { exportRowsToCsv, parseCsvText } from "../../lib/csv";
 import { getTranslation } from "../../i18n";
+
+const REMOVED_TRADE_CODES = new Set(["GEN", "CIVIL", "MEP", "SAFETY", "QA"]);
+const isRemovedTradeCode = (value) => REMOVED_TRADE_CODES.has(String(value || "").toUpperCase());
 
 function DraggableEmployeeRow({ employee }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -172,6 +173,7 @@ function MiniGanttChart({ rows }) {
 
 function SmartGanttBoard({ rows }) {
   const [zoom, setZoom] = useState("DAY");
+  const [collapsedWbs, setCollapsedWbs] = useState(new Set());
 
   const tasks = useMemo(() => {
     if (!Array.isArray(rows)) {
@@ -199,6 +201,7 @@ function SmartGanttBoard({ rows }) {
           parentWbs: row.parent_wbs_code || "",
           dependencyWbs: row.dependency_wbs_code || "",
           dependencyType: row.dependency_type || "FS",
+          quantity: Number(row.quantity || 0),
           start,
           end,
           isValid: !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
@@ -208,17 +211,9 @@ function SmartGanttBoard({ rows }) {
       .sort((a, b) => String(a.wbs).localeCompare(String(b.wbs), undefined, { numeric: true }));
   }, [rows]);
 
-  if (tasks.length === 0) {
-    return (
-      <div className="rounded-xl border border-dashed border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-900">
-        <p className="font-semibold">No Gantt schedule data</p>
-        <p className="mt-1 text-xs text-cyan-800">Create tasks with at least planned dates; include planned end date, parent WBS, and dependencies (FS/FF/SS/SF) for a complete smart Gantt chart.</p>
-      </div>
-    );
-  }
-
-  const minDate = Math.min(...tasks.map((task) => task.start.getTime()));
-  const maxDate = Math.max(...tasks.map((task) => task.end.getTime()));
+  const hasTasks = tasks.length > 0;
+  const minDate = hasTasks ? Math.min(...tasks.map((task) => task.start.getTime())) : Date.now();
+  const maxDate = hasTasks ? Math.max(...tasks.map((task) => task.end.getTime())) : Date.now();
   const oneDay = 24 * 60 * 60 * 1000;
   const zoomConfigs = {
     DAY: { label: "Day", unitDays: 1, minColumnWidth: 44 },
@@ -262,6 +257,124 @@ function SmartGanttBoard({ rows }) {
     return 10;
   };
 
+  const normalizeWbs = (value) => String(value || "").trim();
+
+  const displayTasks = useMemo(() => {
+    const byWbs = new Map();
+    const childrenByParent = new Map();
+    tasks.forEach((task) => {
+      const wbs = normalizeWbs(task.wbs);
+      if (wbs && wbs !== "-") {
+        byWbs.set(wbs, task);
+      }
+    });
+    tasks.forEach((task) => {
+      const parentWbs = normalizeWbs(task.parentWbs);
+      if (!parentWbs) {
+        return;
+      }
+      if (!childrenByParent.has(parentWbs)) {
+        childrenByParent.set(parentWbs, []);
+      }
+      childrenByParent.get(parentWbs).push(task);
+    });
+    childrenByParent.forEach((children) => {
+      children.sort((a, b) => String(a.wbs).localeCompare(String(b.wbs), undefined, { numeric: true }));
+    });
+
+    const taskWithSummary = (task, level) => {
+      const childRows = childrenByParent.get(normalizeWbs(task.wbs)) || [];
+      if (childRows.length === 0) {
+        return {
+          ...task,
+          level,
+          isSummary: false,
+          childCount: 0,
+          calculatedProgress: progressByStatus(task.status),
+          calculatedStatus: task.status
+        };
+      }
+
+      const summaryStart = new Date(Math.min(...childRows.map((child) => child.start.getTime())));
+      const summaryEnd = new Date(Math.max(...childRows.map((child) => child.end.getTime())));
+      const totalWeight = childRows.reduce((sum, child) => sum + Math.max(1, Number(child.quantity || 0)), 0);
+      const weightedProgress = childRows.reduce(
+        (sum, child) => sum + progressByStatus(child.status) * Math.max(1, Number(child.quantity || 0)),
+        0
+      );
+      const childStatuses = new Set(childRows.map((child) => String(child.status || "").toUpperCase()));
+      const calculatedStatus =
+        childStatuses.size === 1 && childStatuses.has("DONE")
+          ? "DONE"
+          : childStatuses.has("IN_PROGRESS")
+            ? "IN_PROGRESS"
+            : childStatuses.has("PAUSED")
+              ? "PAUSED"
+              : "PLANNED";
+
+      return {
+        ...task,
+        level,
+        isSummary: true,
+        childCount: childRows.length,
+        start: summaryStart,
+        end: summaryEnd,
+        calculatedProgress: Math.round(weightedProgress / Math.max(1, totalWeight)),
+        calculatedStatus
+      };
+    };
+
+    const flatten = (task, level = 0, visited = new Set()) => {
+      const wbs = normalizeWbs(task.wbs);
+      if (wbs && visited.has(wbs)) {
+        return [];
+      }
+      const nextVisited = new Set(visited);
+      if (wbs) {
+        nextVisited.add(wbs);
+      }
+      const next = [taskWithSummary(task, level)];
+      if (!collapsedWbs.has(wbs)) {
+        (childrenByParent.get(wbs) || []).forEach((child) => {
+          next.push(...flatten(child, level + 1, nextVisited));
+        });
+      }
+      return next;
+    };
+
+    const roots = tasks.filter((task) => {
+      const parentWbs = normalizeWbs(task.parentWbs);
+      return !parentWbs || !byWbs.has(parentWbs);
+    });
+
+    return roots.flatMap((task) => flatten(task, 0)).slice(0, 30);
+  }, [collapsedWbs, tasks]);
+
+  if (!hasTasks) {
+    return (
+      <div className="rounded-xl border border-dashed border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-900">
+        <p className="font-semibold">No Gantt schedule data</p>
+        <p className="mt-1 text-xs text-cyan-800">Create tasks with at least planned dates; include planned end date, parent WBS, and dependencies for a complete schedule timeline.</p>
+      </div>
+    );
+  }
+
+  const toggleCollapse = (wbs) => {
+    const normalized = normalizeWbs(wbs);
+    if (!normalized) {
+      return;
+    }
+    setCollapsedWbs((prev) => {
+      const next = new Set(prev);
+      if (next.has(normalized)) {
+        next.delete(normalized);
+      } else {
+        next.add(normalized);
+      }
+      return next;
+    });
+  };
+
   const formatDate = (dateValue) => {
     const d = new Date(dateValue);
     if (Number.isNaN(d.getTime())) {
@@ -299,7 +412,7 @@ function SmartGanttBoard({ rows }) {
     <div className="overflow-x-auto rounded-xl border border-steel/15 bg-white">
       <div className="flex items-center justify-between border-b border-steel/10 bg-steel/5 px-3 py-2 text-[11px]">
         <div className="flex items-center gap-3">
-          <div className="font-semibold text-steel">Gantt Schedule ({activeZoom.label})</div>
+          <div className="font-semibold text-steel">Work Schedule Timeline ({activeZoom.label})</div>
           <div className="inline-flex items-center overflow-hidden rounded-lg border border-steel/20 bg-white">
             {Object.entries(zoomConfigs).map(([key, config]) => (
               <button
@@ -322,14 +435,13 @@ function SmartGanttBoard({ rows }) {
       </div>
 
       <div className="grid border-b border-steel/10 bg-steel/5 text-[11px] font-semibold text-steel" style={{ minWidth: `${boardMinWidth}px`, gridTemplateColumns: `${leftPanelWidth}px 1fr` }}>
-        <div className="grid grid-cols-[40px_220px_110px_80px_80px_90px_90px]">
-          <div className="border-r border-steel/10 px-2 py-2 text-center">STT</div>
-          <div className="border-r border-steel/10 px-2 py-2">Task</div>
-          <div className="border-r border-steel/10 px-2 py-2">Assignee</div>
+        <div className="grid grid-cols-[260px_110px_90px_80px_80px_90px]">
+          <div className="border-r border-steel/10 px-2 py-2">WBS / Task</div>
+          <div className="border-r border-steel/10 px-2 py-2">Stage</div>
+          <div className="border-r border-steel/10 px-2 py-2 text-center">Status</div>
           <div className="border-r border-steel/10 px-2 py-2 text-center">Duration</div>
           <div className="border-r border-steel/10 px-2 py-2 text-center">Progress</div>
-          <div className="border-r border-steel/10 px-2 py-2 text-center">Start</div>
-          <div className="px-2 py-2 text-center">Finish</div>
+          <div className="px-2 py-2 text-center">Plan</div>
         </div>
         <div className="grid border-l-2 border-steel/15 pl-1" style={{ gridTemplateColumns: `repeat(${unitCount}, minmax(${activeZoom.minColumnWidth}px, 1fr))` }}>
           {Array.from({ length: unitCount }).map((_, index) => {
@@ -349,30 +461,50 @@ function SmartGanttBoard({ rows }) {
       </div>
 
       <div className="space-y-0">
-        {tasks.slice(0, 30).map((task) => {
+        {displayTasks.map((task) => {
           const left = ((task.start.getTime() - minDate) / timelineTotal) * 100;
           const width = Math.max(1.8, ((task.end.getTime() - task.start.getTime()) / timelineTotal) * 100);
-          const level = Math.max(0, String(task.wbs).split(".").length - 1);
-          const isLate = task.end.getTime() < now && !["DONE", "COMPLETED"].includes(String(task.status || "").toUpperCase());
+          const level = Number(task.level || 0);
+          const normalizedStatus = String(task.calculatedStatus || task.status || "").toUpperCase();
+          const isLate = task.end.getTime() < now && !["DONE", "COMPLETED"].includes(normalizedStatus);
           const durationDays = Math.max(1, Math.ceil((task.end.getTime() - task.start.getTime()) / oneDay) + 1);
-          const progressValue = progressByStatus(task.status);
+          const progressValue = Number(task.calculatedProgress ?? progressByStatus(task.status));
           return (
-            <div key={task.id} className="grid border-b border-steel/10 text-xs" style={{ minWidth: `${boardMinWidth}px`, gridTemplateColumns: `${leftPanelWidth}px 1fr` }}>
-              <div className="grid grid-cols-[40px_220px_110px_80px_80px_90px_90px]">
-                <div className="border-r border-steel/10 px-2 py-2 text-center text-graphite/70">{task.stt}</div>
-                <div className="space-y-1 border-r border-steel/10 px-2 py-2" style={{ paddingLeft: `${10 + Math.min(26, level * 9)}px` }}>
-                  <p className="truncate font-semibold text-steel"><span className="text-cyan-700">{task.wbs}</span> - {task.name}</p>
+            <div key={`${task.id}-${task.level}`} className={`grid border-b border-steel/10 text-xs ${task.isSummary ? "bg-slate-50/70" : "bg-white"}`} style={{ minWidth: `${boardMinWidth}px`, gridTemplateColumns: `${leftPanelWidth}px 1fr` }}>
+              <div className="grid grid-cols-[260px_110px_90px_80px_80px_90px]">
+                <div className="space-y-1 border-r border-steel/10 px-2 py-2" style={{ paddingLeft: `${10 + Math.min(42, level * 18)}px` }}>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    {task.isSummary ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleCollapse(task.wbs)}
+                        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-steel/15 bg-white text-[10px] font-bold text-steel hover:bg-cyan-50"
+                        title={collapsedWbs.has(normalizeWbs(task.wbs)) ? "Expand task group" : "Collapse task group"}
+                      >
+                        {collapsedWbs.has(normalizeWbs(task.wbs)) ? "▸" : "▾"}
+                      </button>
+                    ) : (
+                      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[10px] text-steel/40">{level > 0 ? "└" : ""}</span>
+                    )}
+                    <p className={`truncate ${task.isSummary ? "font-bold text-steel" : "font-semibold text-steel"}`}>
+                      <span className="text-cyan-700">{task.wbs}</span> - {task.name}
+                    </p>
+                  </div>
                   <div className="flex flex-wrap items-center gap-1">
-                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">{task.dependencyType}:{task.dependencyWbs || "-"}</span>
-                    {task.parentWbs && <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-700">Parent {task.parentWbs}</span>}
+                    {task.isSummary && <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">{task.childCount} child task{task.childCount > 1 ? "s" : ""}</span>}
+                    {!task.isSummary && task.dependencyWbs && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Depends on {task.dependencyWbs} ({task.dependencyType || "FS"})</span>}
                     {isLate && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">Delayed</span>}
                   </div>
                 </div>
                 <div className="border-r border-steel/10 px-2 py-2 text-graphite/70">{task.stage}</div>
+                <div className="border-r border-steel/10 px-2 py-2 text-center">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${normalizedStatus === "DONE" || normalizedStatus === "COMPLETED" ? "bg-emerald-100 text-emerald-700" : normalizedStatus === "IN_PROGRESS" ? "bg-cyan-100 text-cyan-700" : normalizedStatus === "PAUSED" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>
+                    {normalizedStatus}
+                  </span>
+                </div>
                 <div className="border-r border-steel/10 px-2 py-2 text-center text-graphite">{durationDays} days</div>
                 <div className="border-r border-steel/10 px-2 py-2 text-center font-semibold text-steel">{progressValue}%</div>
-                <div className="border-r border-steel/10 px-2 py-2 text-center text-graphite">{formatDate(task.start)}</div>
-                <div className="px-2 py-2 text-center text-graphite">{formatDate(task.end)}</div>
+                <div className="px-2 py-2 text-center text-graphite">{formatDate(task.start)} - {formatDate(task.end)}</div>
               </div>
               <div className="relative border-l-2 border-steel/15 px-2 py-2">
                 <div
@@ -383,7 +515,7 @@ function SmartGanttBoard({ rows }) {
                   }}
                 >
                   <div className="absolute inset-y-0 w-px bg-rose-300" style={{ left: `${todayLeft}%` }} />
-                  <div className={`absolute inset-y-1 rounded ${statusTone(task.status)}`} style={{ left: `${left}%`, width: `${width}%` }} />
+                  <div className={`absolute inset-y-1 rounded ${statusTone(task.calculatedStatus || task.status)} ${task.isSummary ? "opacity-70 ring-1 ring-inset ring-steel/20" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} />
                 </div>
               </div>
             </div>
@@ -487,6 +619,61 @@ export function ProjectsPage({
     projectForm.startDate &&
     projectForm.endDate &&
     new Date(projectForm.startDate).getTime() > new Date(projectForm.endDate).getTime();
+  const projectStatusOptions = ["PLANNING", "IN_PROGRESS", "COMPLETED", "PAUSED", "CANCELLED"];
+  const projectCodeOptions = useMemo(
+    () => Array.from(new Set(projectList.map((project) => String(project.project_code || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [projectList]
+  );
+  const projectNameOptions = useMemo(
+    () => Array.from(new Set(projectList.map((project) => String(project.name || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [projectList]
+  );
+  const projectAddressOptions = useMemo(
+    () => Array.from(new Set(projectList.map((project) => String(project.address || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [projectList]
+  );
+  const projectLocationOptions = useMemo(() => {
+    const presets = [
+      { key: "hcm-q1", label: "Ho Chi Minh City - District 1", address: "District 1, Ho Chi Minh City", latitude: "10.7769", longitude: "106.7009" },
+      { key: "thu-duc", label: "Thu Duc - High Tech Park", address: "Khu cong nghe cao, Thu Duc", latitude: "10.8412", longitude: "106.8098" },
+      { key: "binh-duong-vsip", label: "Binh Duong - VSIP II", address: "VSIP II, Binh Duong", latitude: "11.0526", longitude: "106.7163" },
+      { key: "song-than", label: "Binh Duong - Song Than", address: "Khu cong nghiep Song Than, Binh Duong", latitude: "10.9804", longitude: "106.6519" }
+    ];
+    const fromProjects = projectList
+      .filter((project) => project.address && project.latitude != null && project.longitude != null)
+      .map((project) => ({
+        key: `project-${project.id}`,
+        label: `${project.project_code || "Project"} - ${project.address}`,
+        address: project.address,
+        latitude: String(project.latitude),
+        longitude: String(project.longitude)
+      }));
+    const seen = new Set();
+    return [...fromProjects, ...presets].filter((item) => {
+      const key = `${item.address}|${item.latitude}|${item.longitude}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [projectList]);
+  const stageNameOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          "Mobilization",
+          "Foundation",
+          "Structure",
+          "MEP rough-in",
+          "Finishing",
+          "Testing and commissioning",
+          "Handover",
+          ...projectStages.map((stage) => String(stage.stage_name || "").trim())
+        ].filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b)),
+    [projectStages]
+  );
 
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
@@ -652,12 +839,15 @@ export function ProjectsPage({
   }, [assignmentSearch, assignmentForm.projectId, assignmentTradeFilter, assignmentShiftFilter, assignmentDateFilter]);
 
   const tradeFilterOptions = useMemo(() => {
-    const fromEmployees = employeeList.map((u) => String(u.trade_code || "").toUpperCase()).filter(Boolean);
-    const fromAssignments = assignments.map((u) => String(u.trade_code || "").toUpperCase()).filter(Boolean);
+    const fromEmployees = employeeList.map((u) => String(u.trade_code || "").toUpperCase()).filter((trade) => trade && !isRemovedTradeCode(trade));
+    const fromAssignments = assignments.map((u) => String(u.trade_code || "").toUpperCase()).filter((trade) => trade && !isRemovedTradeCode(trade));
     return ["ALL", ...Array.from(new Set([...fromEmployees, ...fromAssignments]))];
   }, [employeeList, assignments]);
 
-  const workforceTradeOptions = useMemo(() => ["ALL", ...Array.from(new Set(employeeList.map((item) => String(item.trade_code || "").toUpperCase()).filter(Boolean)))], [employeeList]);
+  const workforceTradeOptions = useMemo(() => {
+    const employeeTrades = employeeList.map((item) => String(item.trade_code || "").toUpperCase()).filter((trade) => trade && !isRemovedTradeCode(trade));
+    return ["ALL", ...Array.from(new Set(employeeTrades))];
+  }, [employeeList]);
 
   const assignedUserIdSet = useMemo(
     () => new Set((weeklyScheduleRows || []).map((item) => Number(item.userId)).filter((id) => Number.isFinite(id))),
@@ -702,7 +892,7 @@ export function ProjectsPage({
     const quotaTradeSet = new Set(
       (submittedQuotaRows || [])
         .map((row) => String(row.tradeCode || "").toUpperCase())
-        .filter(Boolean)
+        .filter((trade) => trade && !isRemovedTradeCode(trade))
     );
     if (isHRMode && hasSubmittedQuota) {
       return Array.from(quotaTradeSet).sort((a, b) => a.localeCompare(b));
@@ -711,8 +901,14 @@ export function ProjectsPage({
     workforceTradeOptions
       .filter((trade) => trade !== "ALL")
       .forEach((trade) => groups.add(String(trade).toUpperCase()));
-    Object.keys(tradeQuota || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
-    Object.keys(assignedByTrade || {}).forEach((trade) => groups.add(String(trade).toUpperCase()));
+    Object.keys(tradeQuota || {}).forEach((trade) => {
+      const normalizedTrade = String(trade).toUpperCase();
+      if (!isRemovedTradeCode(normalizedTrade)) groups.add(normalizedTrade);
+    });
+    Object.keys(assignedByTrade || {}).forEach((trade) => {
+      const normalizedTrade = String(trade).toUpperCase();
+      if (!isRemovedTradeCode(normalizedTrade)) groups.add(normalizedTrade);
+    });
     return Array.from(groups);
   }, [workforceTradeOptions, tradeQuota, assignedByTrade, isHRMode, hasSubmittedQuota, submittedQuotaRows]);
 
@@ -752,6 +948,7 @@ export function ProjectsPage({
     };
     const sourceRows = Array.isArray(submittedQuotaRows) && submittedQuotaRows.length > 0
       ? submittedQuotaRows.map((row) => ({
+          id: row.id,
           trade: String(row.tradeCode || "").toUpperCase(),
           requested: Math.max(0, Number(row.requestedCount || 0)),
           fulfilled: Math.max(0, Number(row.fulfilledCount || 0)),
@@ -759,11 +956,12 @@ export function ProjectsPage({
           fromDate: String(row.fromDate || workforceRangeStart || ""),
           toDate: String(row.toDate || workforceRangeEnd || "")
         }))
-      : Object.entries(tradeQuota || {}).map(([trade, requestedRaw]) => {
+      : Object.entries(tradeQuota || {}).filter(([trade]) => !isRemovedTradeCode(trade)).map(([trade, requestedRaw]) => {
           const normalizedTrade = String(trade || "").toUpperCase();
           const requested = Math.max(0, Number(requestedRaw || 0));
           const fulfilled = Math.max(0, Number(assignedTradeCount[normalizedTrade] || 0));
           return {
+            id: "",
             trade: normalizedTrade,
             requested,
             fulfilled,
@@ -779,6 +977,7 @@ export function ProjectsPage({
         const fulfilled = Math.max(0, Number(row.fulfilled || 0));
         const missing = Math.max(0, requested - fulfilled);
         return {
+          id: row.id || "",
           trade: normalizedTrade,
           requested,
           fulfilled,
@@ -788,7 +987,7 @@ export function ProjectsPage({
           toDate: String(row.toDate || workforceRangeEnd || "")
         };
       })
-      .filter((row) => row.trade && row.requested > 0)
+      .filter((row) => row.trade && row.requested > 0 && !isRemovedTradeCode(row.trade))
       .filter((row) => (pmQuotaShiftFilter === "ALL" ? true : row.shiftCode === pmQuotaShiftFilter))
       .filter((row) => dayMatch(row.fromDate, row.toDate, pmQuotaDateFilter))
       .filter((row) => monthMatch(row.fromDate, row.toDate, pmQuotaMonthFilter))
@@ -809,7 +1008,7 @@ export function ProjectsPage({
         `/projects/workforce-quotas?projectId=${encodeURIComponent(assignmentForm.projectId)}&fromDate=${encodeURIComponent(workforceRangeStart)}&toDate=${encodeURIComponent(workforceRangeEnd)}&shiftCode=${encodeURIComponent(workforceShiftCode)}`,
         token
       );
-      setSubmittedQuotaRows(Array.isArray(rows) ? rows : []);
+      setSubmittedQuotaRows(Array.isArray(rows) ? rows.filter((row) => !isRemovedTradeCode(row.tradeCode)) : []);
     } catch (error) {
       setSubmittedQuotaRows([]);
       setStatus(`Unable to load requested quota: ${error.message}`);
@@ -832,7 +1031,7 @@ export function ProjectsPage({
       const next = {};
       for (const row of submittedQuotaRows) {
         const trade = String(row.tradeCode || "").toUpperCase();
-        if (trade) {
+        if (trade && !isRemovedTradeCode(trade)) {
           next[trade] = Math.max(0, Number(row.requestedCount || 0));
         }
       }
@@ -842,7 +1041,11 @@ export function ProjectsPage({
     try {
       const raw = localStorage.getItem(quotaStorageKey);
       const parsed = raw ? JSON.parse(raw) : {};
-      setTradeQuota(parsed && typeof parsed === "object" ? parsed : {});
+      setTradeQuota(
+        parsed && typeof parsed === "object"
+          ? Object.fromEntries(Object.entries(parsed).filter(([trade]) => !isRemovedTradeCode(trade)))
+          : {}
+      );
     } catch {
       setTradeQuota({});
     }
@@ -977,6 +1180,7 @@ export function ProjectsPage({
       await apiRequest(`/projects/${projectForm.id}`, token, {
         method: "PUT",
         body: {
+          projectCode: projectForm.projectCode,
           name: projectForm.name,
           address: projectForm.address,
           latitude: latitudeNumber,
@@ -1173,9 +1377,13 @@ export function ProjectsPage({
     setQuotaModalOpen(true);
   };
 
-  const removeQuotaTrade = (tradeCode) => {
-    const target = String(tradeCode || "").toUpperCase();
+  const removeQuotaTrade = async (rowOrTrade) => {
+    const row = typeof rowOrTrade === "object" && rowOrTrade !== null ? rowOrTrade : null;
+    const target = String(row?.trade || rowOrTrade || "").toUpperCase();
     if (!target) return;
+    const ok = window.confirm(`Delete quota for ${target}?`);
+    if (!ok) return;
+
     const next = { ...tradeQuota };
     delete next[target];
     setTradeQuota(next);
@@ -1184,12 +1392,24 @@ export function ProjectsPage({
     } catch {
       // ignore local storage write errors
     }
-    setStatus("Quota configuration updated.");
+    if (row?.id) {
+      try {
+        await apiRequest(`/projects/workforce-quotas/${row.id}`, token, { method: "DELETE" });
+        await loadSubmittedQuotaRows();
+      } catch (error) {
+        setStatus(`Delete quota failed: ${error.message}`);
+        return;
+      }
+    } else {
+      setSubmittedQuotaRows((prev) => prev.filter((item) => String(item.tradeCode || "").toUpperCase() !== target));
+    }
+    setStatus("Quota deleted.");
   };
 
   const saveQuotaConfig = async () => {
     const next = {};
     for (const [trade, value] of Object.entries(quotaDraft || {})) {
+      if (isRemovedTradeCode(trade)) continue;
       const num = Number(value);
       next[trade] = Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
     }
@@ -1205,7 +1425,7 @@ export function ProjectsPage({
           tradeCode: String(tradeCode || "").toUpperCase(),
           requestedCount: Math.max(0, Number(requestedCount || 0))
         }))
-        .filter((row) => row.tradeCode && row.requestedCount > 0);
+        .filter((row) => row.tradeCode && !isRemovedTradeCode(row.tradeCode) && row.requestedCount > 0);
       if (items.length > 0) {
         try {
           await apiRequest("/projects/workforce-quotas/submit", token, {
@@ -1240,7 +1460,7 @@ export function ProjectsPage({
         tradeCode: String(tradeCode || "").toUpperCase(),
         requestedCount: Math.max(0, Number(requestedCount || 0))
       }))
-      .filter((row) => row.tradeCode && row.requestedCount > 0);
+      .filter((row) => row.tradeCode && !isRemovedTradeCode(row.tradeCode) && row.requestedCount > 0);
     if (items.length === 0) {
       setStatus("No quota rows to submit.");
       return;
@@ -1312,7 +1532,7 @@ export function ProjectsPage({
         const quotaTradeSet = new Set(
           (submittedQuotaRows || [])
             .map((row) => String(row.tradeCode || "").toUpperCase())
-            .filter(Boolean)
+            .filter((trade) => trade && !isRemovedTradeCode(trade))
         );
         if (quotaTradeSet.size > 0) {
           normalizedRows = normalizedRows.filter((item) => {
@@ -1396,6 +1616,9 @@ export function ProjectsPage({
       return;
     }
     const targetTrade = overId.replace("drop-", "").toUpperCase();
+    if (isRemovedTradeCode(targetTrade)) {
+      return;
+    }
     const employee = employeeList.find((item) => Number(item.id) === employeeId);
     if (!employee) {
       return;
@@ -1476,23 +1699,31 @@ export function ProjectsPage({
     }
     const quotaTradeSet = new Set(
       Object.entries(tradeQuota || {})
-        .filter(([, requiredRaw]) => Number(requiredRaw || 0) > 0)
+        .filter(([trade, requiredRaw]) => !isRemovedTradeCode(trade) && Number(requiredRaw || 0) > 0)
         .map(([trade]) => String(trade || "").toUpperCase())
     );
     const availableByTrade = {};
+    const flexibleCandidates = [];
     for (const employee of availableEmployees) {
       const trade = String(employee.trade_code || "UNASSIGNED").toUpperCase();
-      if (quotaTradeSet.size > 0 && !quotaTradeSet.has(trade)) {
-        continue;
-      }
+      const employeeId = Number(employee.id);
+      if (!Number.isFinite(employeeId)) continue;
       if (!availableByTrade[trade]) {
         availableByTrade[trade] = [];
       }
-      availableByTrade[trade].push(Number(employee.id));
+      availableByTrade[trade].push(employeeId);
+      if (quotaTradeSet.size === 0 || quotaTradeSet.has(trade) || trade === "UNASSIGNED") {
+        flexibleCandidates.push({ id: employeeId, sourceTrade: trade });
+      }
     }
 
     const picked = [];
+    const pickedSet = new Set();
+    const nextCrossTradeAssignments = { ...crossTradeAssignments };
     for (const [trade, requiredRaw] of Object.entries(tradeQuota || {})) {
+      if (isRemovedTradeCode(trade)) {
+        continue;
+      }
       const required = Number(requiredRaw || 0);
       if (!Number.isFinite(required) || required <= 0) {
         continue;
@@ -1503,8 +1734,18 @@ export function ProjectsPage({
       if (missing <= 0) {
         continue;
       }
-      const candidates = availableByTrade[normalizedTrade] || [];
-      picked.push(...candidates.slice(0, missing));
+      const exactCandidates = (availableByTrade[normalizedTrade] || [])
+        .filter((id) => !pickedSet.has(id))
+        .map((id) => ({ id, sourceTrade: normalizedTrade }));
+      const fallbackCandidates = flexibleCandidates.filter((candidate) => !pickedSet.has(candidate.id));
+      const candidates = [...exactCandidates, ...fallbackCandidates];
+      for (const candidate of candidates.slice(0, missing)) {
+        picked.push(candidate.id);
+        pickedSet.add(candidate.id);
+        if (candidate.sourceTrade !== normalizedTrade) {
+          nextCrossTradeAssignments[String(candidate.id)] = normalizedTrade;
+        }
+      }
     }
 
     if (picked.length === 0) {
@@ -1512,6 +1753,7 @@ export function ProjectsPage({
       return;
     }
     setDraftAssignedUserIds((prev) => Array.from(new Set([...prev.map(Number), ...picked])));
+    setCrossTradeAssignments(nextCrossTradeAssignments);
     setStatus(`Auto-allocated ${picked.length} employee(s) based on quota gaps.`);
   };
 
@@ -1744,14 +1986,29 @@ export function ProjectsPage({
     }
   };
 
+  const successStatusMessages = [
+    "Project created successfully",
+    "Project updated successfully",
+    "Project deleted successfully",
+    "Assignment saved successfully",
+    "Assignment cancelled",
+    "Stage added successfully",
+    "Stage updated successfully",
+    "Stage status updated successfully",
+    "Stage deleted successfully",
+    "Stage order updated successfully",
+    "Quota configuration updated."
+  ];
+  const isSuccessStatus = successStatusMessages.includes(status) || String(status || "").startsWith("Auto-allocated ");
+
   return (
     <section className="space-y-4">
-      {status && !["Ready", "Project list loaded", "Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully", "Quota configuration updated."].includes(status) && (
+      {status && !["Ready", "Project list loaded"].includes(status) && !isSuccessStatus && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
-      {["Project created successfully", "Project updated successfully", "Project deleted successfully", "Assignment saved successfully", "Assignment cancelled", "Stage added successfully", "Stage updated successfully", "Stage status updated successfully", "Stage deleted successfully", "Stage order updated successfully", "Quota configuration updated."].includes(status) && (
+      {isSuccessStatus && (
         <div className="rounded-2xl bg-green-50 p-4 text-sm text-green-700 border border-green-200 flex items-center gap-2">
           <span className="text-lg">✓</span><span>{status}</span>
         </div>
@@ -1963,8 +2220,8 @@ export function ProjectsPage({
               onChange={(e) => setAssignmentSearch(e.target.value)}
             />}
 
-          <div className="mt-3 max-h-[70vh] overflow-x-auto overflow-y-auto rounded-xl border border-steel/15">
-            <table className={`${isPMMode ? "min-w-[980px]" : "min-w-full"} text-left text-xs`}>
+          <div className="mt-3 max-h-[70vh] w-full overflow-x-auto overflow-y-auto rounded-xl border border-steel/15">
+            <table className="min-w-full table-fixed text-left text-xs">
               {!isPMMode ? (
               <>
               <thead>
@@ -2011,18 +2268,18 @@ export function ProjectsPage({
               <>
               <thead>
                 <tr className="border-b border-steel/15 bg-steel/5">
-                  <th className="p-2 font-semibold text-steel">Role / Trade</th>
-                  <th className="p-2 font-semibold text-steel">Shift</th>
-                  <th className="p-2 font-semibold text-steel">Period</th>
-                  <th className="p-2 text-center font-semibold text-steel">Requested</th>
-                  <th className="p-2 text-center font-semibold text-steel">Fulfilled</th>
-                  <th className="p-2 font-semibold text-steel">Status</th>
-                  <th className="p-2 font-semibold text-steel">Action</th>
+                  <th className="w-[16%] p-2 font-semibold text-steel">Role / Trade</th>
+                  <th className="w-[12%] p-2 font-semibold text-steel">Shift</th>
+                  <th className="w-[22%] p-2 font-semibold text-steel">Period</th>
+                  <th className="w-[12%] p-2 text-center font-semibold text-steel">Requested</th>
+                  <th className="w-[12%] p-2 text-center font-semibold text-steel">Fulfilled</th>
+                  <th className="w-[14%] p-2 font-semibold text-steel">Status</th>
+                  <th className="w-[12%] p-2 font-semibold text-steel">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {pmQuotaRows.map((row) => (
-                  <tr key={`pm-quota-${row.trade}`} className="border-b border-steel/10 hover:bg-steel/5">
+                  <tr key={`pm-quota-${row.id || row.trade}-${row.fromDate}-${row.shiftCode}`} className="border-b border-steel/10 hover:bg-steel/5">
                     <td className="p-2 text-graphite">{row.trade}</td>
                     <td className="p-2 text-graphite">{row.shiftCode}</td>
                     <td className="p-2 text-graphite">
@@ -2040,7 +2297,7 @@ export function ProjectsPage({
                     <td className="p-2">
                       <div className="flex items-center gap-1">
                         <button type="button" onClick={openQuotaModal} className="rounded-lg bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-200">Edit</button>
-                        <button type="button" onClick={() => removeQuotaTrade(row.trade)} className="rounded-lg bg-red-100 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-200">Delete</button>
+                        <button type="button" onClick={() => removeQuotaTrade(row)} className="rounded-lg bg-red-100 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-200">Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -2194,12 +2451,20 @@ export function ProjectsPage({
           </div>
 
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-            <input
-              className="rounded-lg border border-steel/20 px-3 py-2 text-sm"
-              placeholder="Stage name"
-              value={stageForm.stageName}
-              onChange={(e) => setStageForm((prev) => ({ ...prev, stageName: e.target.value }))}
-            />
+            <div>
+              <input
+                className="w-full rounded-lg border border-steel/20 px-3 py-2 text-sm"
+                list="project-stage-name-options"
+                placeholder="Stage name"
+                value={stageForm.stageName}
+                onChange={(e) => setStageForm((prev) => ({ ...prev, stageName: e.target.value }))}
+              />
+              <datalist id="project-stage-name-options">
+                {stageNameOptions.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+            </div>
             <div className="flex gap-2">
               <button type="button" onClick={saveStage} className="rounded-lg bg-blue-600 hover:bg-blue-700 px-3 py-2 text-xs font-semibold text-white transition">{stageForm.id ? "Update" : "Add"}</button>
               <button type="button" onClick={() => setStageForm({ id: "", stageName: "" })} className="rounded-lg border border-steel/20 px-3 py-2 text-xs font-semibold">Clear</button>
@@ -2265,12 +2530,36 @@ export function ProjectsPage({
             </div>
             <form onSubmit={submitProjectForm} className="space-y-3">
               <div className="grid gap-3">
-                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Project Code *" value={projectForm.projectCode} onChange={(e) => setProjectForm((p) => ({ ...p, projectCode: e.target.value }))} required />
-                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Project Name *" value={projectForm.name} onChange={(e) => setProjectForm((p) => ({ ...p, name: e.target.value }))} required />
-                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" placeholder="Address" value={projectForm.address} onChange={(e) => setProjectForm((p) => ({ ...p, address: e.target.value }))} />
+                <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                  <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" list="project-code-options" placeholder="Project Code *" value={projectForm.projectCode} onChange={(e) => setProjectForm((p) => ({ ...p, projectCode: e.target.value }))} required />
+                  <button type="button" onClick={() => setProjectForm((p) => ({ ...p, projectCode: `PRJ-${String(projectList.length + 1).padStart(3, "0")}` }))} className="rounded-lg bg-steel/10 px-3 py-2 text-xs font-semibold text-steel hover:bg-steel/20">Generate</button>
+                </div>
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" list="project-name-options" placeholder="Project Name *" value={projectForm.name} onChange={(e) => setProjectForm((p) => ({ ...p, name: e.target.value }))} required />
+                <select
+                  className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm"
+                  value=""
+                  onChange={(e) => {
+                    const selected = projectLocationOptions.find((item) => item.key === e.target.value);
+                    if (!selected) {
+                      return;
+                    }
+                    setProjectForm((p) => ({
+                      ...p,
+                      address: selected.address,
+                      latitude: selected.latitude,
+                      longitude: selected.longitude
+                    }));
+                  }}
+                >
+                  <option value="">Select site location</option>
+                  {projectLocationOptions.map((location) => (
+                    <option key={location.key} value={location.key}>{location.label}</option>
+                  ))}
+                </select>
+                <input className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" list="project-address-options" placeholder="Address" value={projectForm.address} onChange={(e) => setProjectForm((p) => ({ ...p, address: e.target.value }))} />
                 <div className="grid grid-cols-2 gap-3">
-                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLatitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Latitude *" value={projectForm.latitude} onChange={(e) => setProjectForm((p) => ({ ...p, latitude: e.target.value }))} required />
-                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLongitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} placeholder="Longitude *" value={projectForm.longitude} onChange={(e) => setProjectForm((p) => ({ ...p, longitude: e.target.value }))} required />
+                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLatitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} list="project-latitude-options" placeholder="Latitude *" value={projectForm.latitude} onChange={(e) => setProjectForm((p) => ({ ...p, latitude: e.target.value }))} required />
+                  <input className={`rounded-lg border px-4 py-2.5 text-sm ${invalidLongitude ? "border-red-400 bg-red-50" : "border-steel/20"}`} list="project-longitude-options" placeholder="Longitude *" value={projectForm.longitude} onChange={(e) => setProjectForm((p) => ({ ...p, longitude: e.target.value }))} required />
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -2285,10 +2574,35 @@ export function ProjectsPage({
                 {(invalidLatitude || invalidLongitude) && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">Latitude must be in [-90, 90], longitude in [-180, 180].</p>}
                 {invalidProjectDateRange && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">Start date must be earlier than or equal to end date.</p>}
                 <select className="rounded-lg border border-steel/20 px-4 py-2.5 text-sm" value={projectForm.status} onChange={(e) => setProjectForm((p) => ({ ...p, status: e.target.value }))}>
-                  <option value="PLANNING">PLANNING</option>
-                  <option value="IN_PROGRESS">IN_PROGRESS</option>
-                  <option value="COMPLETED">COMPLETED</option>
+                  {projectStatusOptions.map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
                 </select>
+                <datalist id="project-code-options">
+                  {projectCodeOptions.map((value) => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+                <datalist id="project-name-options">
+                  {projectNameOptions.map((value) => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+                <datalist id="project-address-options">
+                  {projectAddressOptions.map((value) => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+                <datalist id="project-latitude-options">
+                  {projectLocationOptions.map((location) => (
+                    <option key={`lat-${location.key}`} value={location.latitude} />
+                  ))}
+                </datalist>
+                <datalist id="project-longitude-options">
+                  {projectLocationOptions.map((location) => (
+                    <option key={`lng-${location.key}`} value={location.longitude} />
+                  ))}
+                </datalist>
               </div>
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setIsProjectModalOpen(false)} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">Cancel</button>
@@ -3019,7 +3333,13 @@ function ProgressPage({ token, projects }) {
   const stageBars = useMemo(() => {
     const stageTaskAgg = new Map();
 
-    taskRows.forEach((task) => {
+    const childWbsSet = new Set(taskRows.map((task) => String(task.parent_wbs_code || "").trim()).filter(Boolean));
+    const executionTasks = taskRows.filter((task) => {
+      const wbs = String(task.wbs_code || "").trim();
+      return !wbs || !childWbsSet.has(wbs);
+    });
+
+    executionTasks.forEach((task) => {
       if (task.stage_id == null) {
         return;
       }
@@ -3064,12 +3384,41 @@ function ProgressPage({ token, projects }) {
     [stageProgress]
   );
 
+  const parentTaskByWbs = useMemo(() => {
+    const byWbs = new Map();
+    taskRows.forEach((task) => {
+      const wbs = String(task.wbs_code || "").trim();
+      if (wbs) {
+        byWbs.set(wbs, task);
+      }
+    });
+    return byWbs;
+  }, [taskRows]);
+
+  const executionTaskRows = useMemo(() => {
+    const childWbsSet = new Set(taskRows.map((task) => String(task.parent_wbs_code || "").trim()).filter(Boolean));
+    return taskRows
+      .filter((task) => {
+        const wbs = String(task.wbs_code || "").trim();
+        return !wbs || !childWbsSet.has(wbs);
+      })
+      .map((task) => {
+        const parentWbs = String(task.parent_wbs_code || "").trim();
+        const parentTask = parentWbs ? parentTaskByWbs.get(parentWbs) : null;
+        return {
+          ...task,
+          parentTaskName: parentTask?.item_name || "",
+          parentTaskWbs: parentTask?.wbs_code || parentWbs
+        };
+      });
+  }, [parentTaskByWbs, taskRows]);
+
   const boardTasks = useMemo(() => {
     if (selectedStageId === "ALL") {
-      return taskRows;
+      return executionTaskRows;
     }
-    return taskRows.filter((task) => String(task.stage_id) === String(selectedStageId));
-  }, [taskRows, selectedStageId]);
+    return executionTaskRows.filter((task) => String(task.stage_id) === String(selectedStageId));
+  }, [executionTaskRows, selectedStageId]);
 
   const normalizeTaskColumn = useCallback((rawStatus) => {
     const normalized = String(rawStatus || "").toUpperCase();
@@ -3153,7 +3502,7 @@ function ProgressPage({ token, projects }) {
     }
 
     const targetStatus = targetColumn.targetStatus;
-    const draggedTask = taskRows.find((task) => String(task.id) === String(draggingTaskId));
+    const draggedTask = executionTaskRows.find((task) => String(task.id) === String(draggingTaskId));
     const currentColumn = normalizeTaskColumn(draggedTask?.status);
 
     if (!draggedTask || currentColumn === columnKey) {
@@ -3175,7 +3524,8 @@ function ProgressPage({ token, projects }) {
       let noteSynced = true;
       try {
         const stageName = draggedTask.stage_name || "Unknown";
-        const noteText = `Stage ${stageName} moved to ${targetColumn.title} by Manager`;
+        const parentName = draggedTask.parentTaskName ? ` under ${draggedTask.parentTaskName}` : "";
+        const noteText = `Task ${draggedTask.wbs_code || draggedTask.id}${parentName} in stage ${stageName} moved to ${targetColumn.title} by Manager`;
         const progressCandidates = [
           Number(selectedProject?.progress_percent),
           Number(selectedOverview?.project_progress_percent),
@@ -3330,7 +3680,7 @@ function ProgressPage({ token, projects }) {
         <div className="mb-3 flex items-center justify-between gap-2">
           <div>
             <h3 className="text-base font-bold text-steel">Task Workflow Board</h3>
-            <p className="text-xs text-graphite/70">Drag task cards between columns like Jira to change status and auto-log history.</p>
+            <p className="text-xs text-graphite/70">Only execution child tasks are shown. Parent WBS and stage progress are calculated from their child tasks.</p>
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -3343,7 +3693,7 @@ function ProgressPage({ token, projects }) {
                 <option key={stage.id} value={stage.id}>{stage.label}</option>
               ))}
             </select>
-            <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700">{boardTasks.length} tasks</span>
+            <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700">{boardTasks.length} child tasks</span>
           </div>
         </div>
 
@@ -3388,11 +3738,18 @@ function ProgressPage({ token, projects }) {
                       }}
                       className={`cursor-grab rounded-xl border border-steel/15 bg-white p-3 shadow-sm transition hover:border-cyan-300 hover:shadow ${String(draggingTaskId) === String(task.id) ? "opacity-60" : ""}`}
                     >
-                      <p className="text-xs text-graphite/60">{task.wbs_code || `Task #${task.id}`}</p>
+                      <div className="flex items-center justify-between gap-2 text-xs text-graphite/60">
+                        <span>{task.wbs_code || `Task #${task.id}`}</span>
+                        <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-graphite/60">{task.status || "PLANNED"}</span>
+                      </div>
                       <p className="mt-0.5 text-sm font-semibold text-graphite line-clamp-2">{task.item_name || "Untitled task"}</p>
-                      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-graphite/70">
+                      <div className="mt-2 grid gap-1 text-[11px] text-graphite/70">
+                        {task.parentTaskWbs && (
+                          <span className="rounded-lg bg-slate-50 px-2 py-1">
+                            Parent: <span className="font-semibold text-steel">{task.parentTaskWbs}{task.parentTaskName ? ` - ${task.parentTaskName}` : ""}</span>
+                          </span>
+                        )}
                         <span className="rounded-full bg-sky-50 px-2 py-0.5 font-semibold text-sky-700">{task.stage_name || "No stage"}</span>
-                        <span>{task.status || "PLANNED"}</span>
                       </div>
                     </article>
                   ))}
@@ -3523,15 +3880,24 @@ function ReportsPage({ token }) {
   const [attendanceSummary, setAttendanceSummary] = useState([]);
   const [progressSummary, setProgressSummary] = useState([]);
   const [materialsSummary, setMaterialsSummary] = useState({ totalReceived: 0, totalUsed: 0, purchaseProgress: 0, overusedCount: 0 });
-  const [costSummary, setCostSummary] = useState({ totalCost: 0, pendingPayment: 0 });
+  const [portfolioSummary, setPortfolioSummary] = useState({ total: 0, inProgress: 0, completed: 0, paused: 0, delayed: 0 });
+  const [scheduleSummary, setScheduleSummary] = useState({ averageProgress: 0, onSchedule: 0, delayed: 0, overdueTasks: 0 });
+  const [costSummary, setCostSummary] = useState({ totalCost: 0, approvedCost: 0, paidCost: 0, pendingPayment: 0, draftCount: 0 });
+  const [riskSummary, setRiskSummary] = useState({
+    lowStockMaterials: 0,
+    pendingMaterials: 0,
+    scheduledWorkers: 0,
+    checkedInWorkers: 0,
+    absentWorkers: 0,
+    openIssues: 0,
+    safetyIncidents: 0,
+    qualityWarnings: 0
+  });
   const [diaryCount, setDiaryCount] = useState(0);
-  const [projectOptions, setProjectOptions] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [projectMaterials, setProjectMaterials] = useState([]);
-  const [projectTasks, setProjectTasks] = useState([]);
 
   const load = useCallback(async () => {
     try {
+      const todayText = new Date().toISOString().slice(0, 10);
       const [att, progress, projects] = await Promise.all([
         apiRequest("/attendance/reports/attendance-summary", token),
         apiRequest("/projects/reports/progress", token),
@@ -3541,10 +3907,11 @@ function ReportsPage({ token }) {
       setProgressSummary(Array.isArray(progress) ? progress : []);
 
       const allProjects = Array.isArray(projects) ? projects : [];
-      setProjectOptions(allProjects);
       const materialResponses = await Promise.all(allProjects.map((project) => apiRequest(`/projects/${project.id}/materials`, token).catch(() => [])));
       const costResponses = await Promise.all(allProjects.map((project) => apiRequest(`/projects/${project.id}/costs`, token).catch(() => [])));
       const diaryResponses = await Promise.all(allProjects.map((project) => apiRequest(`/projects/${project.id}/construction-diary`, token).catch(() => [])));
+      const taskResponses = await Promise.all(allProjects.map((project) => apiRequest(`/projects/${project.id}/plan-boq`, token).catch(() => [])));
+      const dailyOps = await apiRequest(`/projects/work-schedules/daily-ops?date=${encodeURIComponent(todayText)}`, token).catch(() => null);
 
       const allMaterials = materialResponses.flat();
       const totalReceived = allMaterials.reduce((sum, row) => sum + Number(row.received_qty || 0), 0);
@@ -3554,9 +3921,44 @@ function ReportsPage({ token }) {
 
       const allCosts = costResponses.flat();
       const totalCost = allCosts.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      const approvedCost = allCosts
+        .filter((row) => String(row.status || "").toUpperCase() === "APPROVED")
+        .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      const paidCost = allCosts
+        .filter((row) => String(row.status || "").toUpperCase() === "PAID")
+        .reduce((sum, row) => sum + Number(row.amount || 0), 0);
       const pendingPayment = allCosts
         .filter((row) => String(row.status || "").toUpperCase() !== "PAID")
         .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+      const draftCount = allCosts.filter((row) => String(row.status || "").toUpperCase() === "DRAFT").length;
+
+      const allTasks = taskResponses.flat();
+      const overdueTasks = allTasks.filter((row) => {
+        const statusText = String(row.status || "").toUpperCase();
+        const endText = row.planned_end_date || row.planned_date;
+        return endText && String(endText).slice(0, 10) < todayText && !["DONE", "COMPLETED"].includes(statusText);
+      }).length;
+
+      const normalizedProgress = Array.isArray(progress) ? progress : [];
+      const progressByProjectId = new Map(normalizedProgress.map((row) => [String(row.id), Number(row.latest_progress_percent || row.progress_percent || 0)]));
+      const activeProjects = allProjects.filter((project) => !["COMPLETED", "CANCELLED"].includes(String(project.status || "").toUpperCase()));
+      const delayedProjects = activeProjects.filter((project) => project.end_date && String(project.end_date).slice(0, 10) < todayText);
+      const progressValues = allProjects.map((project) => progressByProjectId.get(String(project.id)) ?? Number(project.progress_percent || 0));
+      const averageProgress = progressValues.length ? Math.round(progressValues.reduce((sum, value) => sum + value, 0) / progressValues.length) : 0;
+
+      const allDiaries = diaryResponses.flat();
+      const openIssues = allDiaries.filter((row) => String(row.status || "").toUpperCase() !== "CLOSED").length;
+      const safetyIncidents = allDiaries.filter((row) => String(row.incident_report || "").trim()).length;
+      const qualityWarnings = allDiaries.filter((row) => {
+        const quality = String(row.quality_rating || "").toUpperCase();
+        const safety = String(row.safety_rating || "").toUpperCase();
+        return (quality && !["GOOD", "OK"].includes(quality)) || (safety && !["GOOD", "OK"].includes(safety));
+      }).length;
+
+      const dailyProjectSummary = Array.isArray(dailyOps?.projectSummary) ? dailyOps.projectSummary : [];
+      const scheduledWorkers = dailyProjectSummary.reduce((sum, row) => sum + Number(row.assigned_count || 0), 0);
+      const checkedInWorkers = dailyProjectSummary.reduce((sum, row) => sum + Number(row.checked_in_count || 0), 0);
+      const absentWorkers = dailyProjectSummary.reduce((sum, row) => sum + Number(row.absent_count || 0), 0);
 
       setMaterialsSummary({
         totalReceived,
@@ -3564,8 +3966,31 @@ function ReportsPage({ token }) {
         purchaseProgress: totalPlanned > 0 ? Math.round((totalReceived / totalPlanned) * 100) : 0,
         overusedCount
       });
-      setCostSummary({ totalCost, pendingPayment });
-      setDiaryCount(diaryResponses.flat().length);
+      setPortfolioSummary({
+        total: allProjects.length,
+        inProgress: allProjects.filter((project) => String(project.status || "").toUpperCase() === "IN_PROGRESS").length,
+        completed: allProjects.filter((project) => String(project.status || "").toUpperCase() === "COMPLETED").length,
+        paused: allProjects.filter((project) => String(project.status || "").toUpperCase() === "PAUSED").length,
+        delayed: delayedProjects.length
+      });
+      setScheduleSummary({
+        averageProgress,
+        onSchedule: Math.max(activeProjects.length - delayedProjects.length, 0),
+        delayed: delayedProjects.length,
+        overdueTasks
+      });
+      setCostSummary({ totalCost, approvedCost, paidCost, pendingPayment, draftCount });
+      setRiskSummary({
+        lowStockMaterials: allMaterials.filter((row) => Number(row.received_qty || 0) - Number(row.used_qty || 0) <= 0 && Number(row.planned_qty || 0) > 0).length,
+        pendingMaterials: allMaterials.filter((row) => Number(row.received_qty || 0) < Number(row.planned_qty || 0)).length,
+        scheduledWorkers,
+        checkedInWorkers,
+        absentWorkers,
+        openIssues,
+        safetyIncidents,
+        qualityWarnings
+      });
+      setDiaryCount(allDiaries.length);
       setStatus("Reports loaded");
     } catch (error) {
       setStatus(`Failed to load reports: ${error.message}`);
@@ -3575,34 +4000,6 @@ function ReportsPage({ token }) {
   useEffect(() => {
     load();
   }, [load]);
-
-  useEffect(() => {
-    if (!selectedProjectId && projectOptions[0]?.id) {
-      setSelectedProjectId(String(projectOptions[0].id));
-    }
-  }, [projectOptions, selectedProjectId]);
-
-  const loadProjectDetails = useCallback(async () => {
-    if (!selectedProjectId) {
-      setProjectMaterials([]);
-      setProjectTasks([]);
-      return;
-    }
-    try {
-      const [materials, tasks] = await Promise.all([
-        apiRequest(`/projects/${selectedProjectId}/materials`, token),
-        apiRequest(`/projects/${selectedProjectId}/plan-boq`, token)
-      ]);
-      setProjectMaterials(Array.isArray(materials) ? materials : []);
-      setProjectTasks(Array.isArray(tasks) ? tasks : []);
-    } catch (error) {
-      setStatus(`Failed to load project details: ${error.message}`);
-    }
-  }, [selectedProjectId, token]);
-
-  useEffect(() => {
-    loadProjectDetails();
-  }, [loadProjectDetails]);
 
   const attendanceChartData = useMemo(
     () =>
@@ -3630,102 +4027,77 @@ function ReportsPage({ token }) {
     [progressSummary]
   );
 
-  const importOverRows = useMemo(
-    () => projectMaterials.filter((row) => Number(row.received_qty || 0) > Number(row.planned_qty || 0)),
-    [projectMaterials]
-  );
-
-  const usageOverRows = useMemo(
-    () => projectMaterials.filter((row) => Number(row.used_qty || 0) > Number(row.planned_qty || 0)),
-    [projectMaterials]
-  );
-
-  const stockRows = useMemo(
-    () =>
-      projectMaterials.map((row) => {
-        const planned = Number(row.planned_qty || 0);
-        const received = Number(row.received_qty || 0);
-        const used = Number(row.used_qty || 0);
-        const stock = received - used;
-        const exportOver = Math.max(0, used - planned);
-        const exportOverPercent = planned > 0 ? (exportOver / planned) * 100 : 0;
-
-        let exportAlert = 0;
-        if (exportOver > 0) {
-          exportAlert = exportOverPercent > 10 ? 2 : 1;
-        }
-
-        let alertLevel = "Normal";
-        if (exportAlert === 2) {
-          alertLevel = "Warning 2";
-        } else if (exportAlert === 1) {
-          alertLevel = "Warning 1";
-        }
-        return {
-          id: row.id,
-          materialName: row.material_name,
-          unit: row.unit,
-          planned,
-          received,
-          used,
-          stock,
-          alertLevel
-        };
-      }),
-    [projectMaterials]
-  );
-
-  const taskWorkRows = useMemo(
-    () =>
-      projectTasks.slice(0, 8).map((row) => {
-        const status = String(row.status || "PLANNED").toUpperCase();
-        const progressValue = status === "DONE" ? 100 : status === "IN_PROGRESS" ? 65 : status === "PAUSED" ? 25 : 10;
-        return {
-          id: row.id,
-          name: row.item_name,
-          wbs: row.wbs_code || "-",
-          start: row.planned_date ? String(row.planned_date).slice(0, 10) : "-",
-          finish: row.actual_date ? String(row.actual_date).slice(0, 10) : "-",
-          status,
-          progressValue
-        };
-      }),
-    [projectTasks]
-  );
-
-  const selectedProjectLabel = useMemo(() => {
-    const found = projectOptions.find((project) => String(project.id) === String(selectedProjectId));
-    return found ? `${found.project_code} - ${found.name}` : "-";
-  }, [projectOptions, selectedProjectId]);
-
-  const alertBadgeClass = (alertLevel) => {
-    if (alertLevel === "Warning 2") {
-      return "bg-red-100 text-red-700 border-red-200";
-    }
-    if (alertLevel === "Warning 1") {
-      return "bg-amber-100 text-amber-700 border-amber-200";
-    }
-    return "bg-emerald-100 text-emerald-700 border-emerald-200";
-  };
-
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between rounded-2xl bg-white/50 p-4 backdrop-blur">
         <h2 className="text-2xl font-bold text-steel">Reporting Summary</h2>
-        <div className="flex items-center gap-2">
-          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
-            {projectOptions.map((project) => (
-              <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
-            ))}
-          </select>
-          <button type="button" onClick={() => { load(); loadProjectDetails(); }} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">Reload</button>
-        </div>
+        <button type="button" onClick={load} className="rounded-lg bg-steel hover:bg-steel/90 px-4 py-2 text-sm font-semibold text-white transition">Reload</button>
       </div>
       {status && status !== "Reports loaded" && status !== "Ready" && (
         <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200 flex items-center gap-2">
           <span className="text-lg">⚠️</span><span>{status}</span>
         </div>
       )}
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          { label: "Total projects", value: portfolioSummary.total, tone: "text-slate-800", caption: `${portfolioSummary.inProgress} in progress` },
+          { label: "Average progress", value: `${scheduleSummary.averageProgress}%`, tone: "text-emerald-700", caption: `${scheduleSummary.onSchedule} on schedule` },
+          { label: "Total cost", value: costSummary.totalCost.toLocaleString(), tone: "text-cyan-700", caption: `${costSummary.pendingPayment.toLocaleString()} pending` },
+          { label: "Active workforce", value: riskSummary.checkedInWorkers, tone: "text-violet-700", caption: `${riskSummary.scheduledWorkers} scheduled today` },
+          { label: "Open issues", value: riskSummary.openIssues, tone: "text-amber-700", caption: `${riskSummary.safetyIncidents} safety incidents` }
+        ].map((item) => (
+          <div key={item.label} className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-graphite/60">{item.label}</p>
+            <p className={`mt-2 text-2xl font-bold ${item.tone}`}>{item.value}</p>
+            <p className="mt-1 text-xs text-graphite/60">{item.caption}</p>
+          </div>
+        ))}
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-3">
+        <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
+          <h3 className="mb-3 text-base font-bold text-steel">Project portfolio overview</h3>
+          <div className="grid gap-2 text-sm">
+            <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"><span>In progress</span><strong>{portfolioSummary.inProgress}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-2"><span>Completed</span><strong>{portfolioSummary.completed}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2"><span>Paused</span><strong>{portfolioSummary.paused}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-2"><span>Delayed</span><strong>{portfolioSummary.delayed}</strong></div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
+          <h3 className="mb-3 text-base font-bold text-steel">Schedule health</h3>
+          <div className="space-y-3">
+            {[
+              { label: "Average progress", value: scheduleSummary.averageProgress, tone: "bg-emerald-500" },
+              { label: "On-schedule projects", value: portfolioSummary.total ? Math.round((scheduleSummary.onSchedule / Math.max(1, portfolioSummary.total)) * 100) : 0, tone: "bg-cyan-500" },
+              { label: "Delayed projects", value: portfolioSummary.total ? Math.round((scheduleSummary.delayed / Math.max(1, portfolioSummary.total)) * 100) : 0, tone: "bg-red-500" }
+            ].map((item) => (
+              <div key={item.label}>
+                <div className="mb-1 flex items-center justify-between text-xs">
+                  <span className="font-semibold text-graphite/70">{item.label}</span>
+                  <span className="font-bold text-steel">{item.value}%</span>
+                </div>
+                <div className="h-2 rounded-full bg-steel/10">
+                  <div className={`h-2 rounded-full ${item.tone}`} style={{ width: `${Math.max(0, Math.min(100, item.value))}%` }} />
+                </div>
+              </div>
+            ))}
+            <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">Overdue tasks: <strong>{scheduleSummary.overdueTasks}</strong></div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
+          <h3 className="mb-3 text-base font-bold text-steel">Risk summary</h3>
+          <div className="grid gap-2 text-sm">
+            <div className="flex items-center justify-between rounded-lg bg-cyan-50 px-3 py-2"><span>Pending material receipt</span><strong>{riskSummary.pendingMaterials}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2"><span>Low stock materials</span><strong>{riskSummary.lowStockMaterials}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-violet-50 px-3 py-2"><span>Absent workers today</span><strong>{riskSummary.absentWorkers}</strong></div>
+            <div className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-2"><span>Quality warnings</span><strong>{riskSummary.qualityWarnings}</strong></div>
+          </div>
+        </div>
+      </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
         <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
@@ -3745,9 +4117,10 @@ function ReportsPage({ token }) {
           <p className="mt-1 text-xs text-graphite/70">Received: {materialsSummary.totalReceived.toFixed(2)} | Used: {materialsSummary.totalUsed.toFixed(2)}</p>
         </div>
         <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
-          <h3 className="mb-2 text-base font-bold text-steel">Reports thu chi</h3>
+          <h3 className="mb-2 text-base font-bold text-steel">Cost report</h3>
           <p className="text-2xl font-bold text-emerald-700">{costSummary.totalCost.toLocaleString()}</p>
-          <p className="mt-1 text-xs text-graphite/70">Pending payment: {costSummary.pendingPayment.toLocaleString()}</p>
+          <p className="mt-1 text-xs text-graphite/70">Approved: {costSummary.approvedCost.toLocaleString()} | Paid: {costSummary.paidCost.toLocaleString()}</p>
+          <p className="mt-1 text-xs text-graphite/70">Pending payment: {costSummary.pendingPayment.toLocaleString()} | Draft items: {costSummary.draftCount}</p>
         </div>
         <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
           <h3 className="mb-2 text-base font-bold text-steel">Construction diary report</h3>
@@ -3756,262 +4129,6 @@ function ReportsPage({ token }) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-base font-bold text-steel">Material over-plan report</h3>
-          <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700">{selectedProjectLabel}</span>
-        </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-xl border border-red-100 bg-red-50 p-3">
-            <p className="text-xs text-red-600">Total over-import materials</p>
-            <p className="text-2xl font-bold text-red-700">{importOverRows.length}</p>
-          </div>
-          <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
-            <p className="text-xs text-amber-600">Total over-usage materials</p>
-            <p className="text-2xl font-bold text-amber-700">{usageOverRows.length}</p>
-          </div>
-          <div className="rounded-xl border border-orange-100 bg-orange-50 p-3">
-            <p className="text-xs text-orange-600">Tasks over material limits</p>
-            <p className="text-2xl font-bold text-orange-700">{usageOverRows.length}</p>
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-4 xl:grid-cols-2">
-          <section className="overflow-x-auto rounded-xl border border-steel/10">
-            <div className="border-b border-steel/10 bg-steel/5 px-3 py-2 text-xs font-semibold text-steel">Over-import materials</div>
-            <table className="min-w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-steel/10 bg-white">
-                  <th className="p-2 font-semibold text-steel">Material</th>
-                  <th className="p-2 font-semibold text-steel text-right">Planned</th>
-                  <th className="p-2 font-semibold text-steel text-right">Total received</th>
-                  <th className="p-2 font-semibold text-steel text-right">Stock</th>
-                </tr>
-              </thead>
-              <tbody>
-                {importOverRows.slice(0, 8).map((row) => (
-                  <tr key={row.id} className="border-b border-steel/10">
-                    <td className="p-2 text-graphite">{row.material_name}</td>
-                    <td className="p-2 text-right text-graphite">{Number(row.planned_qty || 0).toFixed(2)}</td>
-                    <td className="p-2 text-right text-graphite">{Number(row.received_qty || 0).toFixed(2)}</td>
-                    <td className="p-2 text-right text-graphite">{(Number(row.received_qty || 0) - Number(row.used_qty || 0)).toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {importOverRows.length === 0 && <div className="p-3 text-center text-xs text-graphite/60">No over-imported materials</div>}
-          </section>
-
-          <section className="overflow-x-auto rounded-xl border border-steel/10">
-            <div className="border-b border-steel/10 bg-steel/5 px-3 py-2 text-xs font-semibold text-steel">Over-usage materials</div>
-            <table className="min-w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-steel/10 bg-white">
-                  <th className="p-2 font-semibold text-steel">Material</th>
-                  <th className="p-2 font-semibold text-steel text-right">Planned</th>
-                  <th className="p-2 font-semibold text-steel text-right">Total used</th>
-                  <th className="p-2 font-semibold text-steel text-right">Usage %</th>
-                </tr>
-              </thead>
-              <tbody>
-                {usageOverRows.slice(0, 8).map((row) => {
-                  const planned = Number(row.planned_qty || 0);
-                  const used = Number(row.used_qty || 0);
-                  const percent = planned > 0 ? Math.round((used / planned) * 100) : 0;
-                  return (
-                    <tr key={row.id} className="border-b border-steel/10">
-                      <td className="p-2 text-graphite">{row.material_name}</td>
-                      <td className="p-2 text-right text-graphite">{planned.toFixed(2)}</td>
-                      <td className="p-2 text-right text-graphite">{used.toFixed(2)}</td>
-                      <td className="p-2 text-right text-red-600 font-semibold">{percent}%</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {usageOverRows.length === 0 && <div className="p-3 text-center text-xs text-graphite/60">No over-used materials</div>}
-          </section>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
-        <h3 className="mb-3 text-base font-bold text-steel">Per-task execution report</h3>
-        <div className="overflow-x-auto rounded-xl border border-steel/10">
-          <table className="min-w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-steel/10 bg-steel/5">
-                <th className="p-2 font-semibold text-steel">Task</th>
-                <th className="p-2 font-semibold text-steel">WBS</th>
-                <th className="p-2 font-semibold text-steel">Start date</th>
-                <th className="p-2 font-semibold text-steel">End date</th>
-                <th className="p-2 font-semibold text-steel">Status</th>
-                <th className="p-2 font-semibold text-steel text-right">Progress</th>
-              </tr>
-            </thead>
-            <tbody>
-              {taskWorkRows.map((row) => (
-                <tr key={row.id} className="border-b border-steel/10">
-                  <td className="p-2 text-graphite">{row.name}</td>
-                  <td className="p-2 text-graphite">{row.wbs}</td>
-                  <td className="p-2 text-graphite">{row.start}</td>
-                  <td className="p-2 text-graphite">{row.finish}</td>
-                  <td className="p-2 text-graphite">{row.status}</td>
-                  <td className="p-2 text-right">
-                    <span className="rounded-full bg-emerald-100 px-2 py-1 font-semibold text-emerald-700">{row.progressValue}%</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {taskWorkRows.length === 0 && <div className="p-3 text-center text-xs text-graphite/60">No task data yet</div>}
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
-        <h3 className="mb-3 text-base font-bold text-steel">Material inventory report</h3>
-        <div className="overflow-x-auto rounded-xl border border-steel/10">
-          <table className="min-w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-steel/10 bg-steel/5">
-                <th className="p-2 font-semibold text-steel">Code</th>
-                <th className="p-2 font-semibold text-steel">Material name</th>
-                <th className="p-2 font-semibold text-steel">Unit</th>
-                <th className="p-2 font-semibold text-steel text-right">Planned</th>
-                <th className="p-2 font-semibold text-steel text-right">Total received</th>
-                <th className="p-2 font-semibold text-steel text-right">Total used</th>
-                <th className="p-2 font-semibold text-steel text-right">Stock</th>
-                <th className="p-2 font-semibold text-steel">Warning</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stockRows.map((row, index) => (
-                <tr key={row.id} className="border-b border-steel/10">
-                  <td className="p-2 text-cyan-700 font-semibold">MT{String(index + 1).padStart(3, "0")}</td>
-                  <td className="p-2 text-graphite">{row.materialName}</td>
-                  <td className="p-2 text-graphite">{row.unit || "-"}</td>
-                  <td className="p-2 text-right text-graphite">{row.planned.toFixed(2)}</td>
-                  <td className="p-2 text-right text-graphite">{row.received.toFixed(2)}</td>
-                  <td className="p-2 text-right text-graphite">{row.used.toFixed(2)}</td>
-                  <td className="p-2 text-right text-graphite font-semibold">{row.stock.toFixed(2)}</td>
-                  <td className="p-2">
-                    <span className={`rounded-full border px-2 py-1 font-semibold ${alertBadgeClass(row.alertLevel)}`}>{row.alertLevel}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {stockRows.length === 0 && <div className="p-3 text-center text-xs text-graphite/60">No inventory data yet</div>}
-        </div>
-      </section>
-
-      <div className="rounded-2xl border border-steel/15 bg-white p-4 text-xs text-graphite/70">
-        <p className="font-semibold text-steel">Notes:</p>
-        <p className="mt-1">FaceID requires a mobile app and device SDK; the web version currently supports GPS attendance and realtime reporting.</p>
-        <p className="mt-1">Plan import/export uses Excel-compatible CSV.</p>
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        {/* Attendance Summary - Cyan/Blue card */}
-        <section className="rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-500 p-5 text-white shadow-lg overflow-hidden">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-white/20 p-2"><span className="text-xl">⏱️</span></div>
-              <h3 className="text-lg font-bold">Attendance Summary</h3>
-            </div>
-            <button
-              type="button"
-              onClick={() =>
-                exportRowsToCsv(
-                  "manager-attendance-summary.csv",
-                  [
-                    { key: "employee_code", label: "Employee Code" },
-                    { key: "full_name", label: "Full Name" },
-                    { key: "total_shifts", label: "Total shifts" },
-                    { key: "completed_shifts", label: "Completed shifts" },
-                    { key: "first_check_in", label: "First check-in" },
-                    { key: "last_check_in", label: "Latest check-in" }
-                  ],
-                  attendanceSummary
-                )
-              }
-              className="rounded-lg bg-white/20 hover:bg-white/30 px-3 py-1 text-xs font-semibold transition"
-            >
-              ↓ CSV
-            </button>
-          </div>
-          <div className="max-h-72 overflow-auto text-sm">
-            <table className="min-w-full text-left text-white">
-              <thead>
-                <tr className="border-b border-white/30">
-                  <th className="p-2 font-semibold">Employee</th>
-                  <th className="p-2 font-semibold text-center">Total</th>
-                  <th className="p-2 font-semibold text-center">Completed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {attendanceSummary.map((r) => (
-                  <tr key={r.user_id} className="border-b border-white/20">
-                    <td className="p-2">{r.employee_code}</td>
-                    <td className="p-2 text-center font-semibold">{r.total_shifts}</td>
-                    <td className="p-2 text-center font-semibold">{r.completed_shifts}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {attendanceSummary.length === 0 && <div className="text-center py-4 text-white/70">No data available</div>}
-          </div>
-        </section>
-
-        {/* Project Progress Summary - Green card */}
-        <section className="rounded-2xl bg-gradient-to-br from-emerald-400 to-green-500 p-5 text-white shadow-lg overflow-hidden">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-white/20 p-2"><span className="text-xl"></span></div>
-              <h3 className="text-lg font-bold">Project Progress</h3>
-            </div>
-            <button
-              type="button"
-              onClick={() =>
-                exportRowsToCsv(
-                  "manager-project-progress-summary.csv",
-                  [
-                    { key: "project_code", label: "Project Code" },
-                    { key: "name", label: "Project Name" },
-                    { key: "status", label: "Status" },
-                    { key: "latest_progress_percent", label: "Latest progress (%)" },
-                    { key: "latest_progress_time", label: "Updated at" }
-                  ],
-                  progressSummary
-                )
-              }
-              className="rounded-lg bg-white/20 hover:bg-white/30 px-3 py-1 text-xs font-semibold transition"
-            >
-              ↓ CSV
-            </button>
-          </div>
-          <div className="max-h-72 overflow-auto text-sm">
-            <table className="min-w-full text-left text-white">
-              <thead>
-                <tr className="border-b border-white/30">
-                  <th className="p-2 font-semibold">Project</th>
-                  <th className="p-2 font-semibold">Status</th>
-                  <th className="p-2 font-semibold text-right">Progress</th>
-                </tr>
-              </thead>
-              <tbody>
-                {progressSummary.map((p) => (
-                  <tr key={p.id} className="border-b border-white/20">
-                    <td className="p-2 truncate">{p.project_code}</td>
-                    <td className="p-2 text-xs">{p.status || "-"}</td>
-                    <td className="p-2 text-right font-bold">{p.latest_progress_percent}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {progressSummary.length === 0 && <div className="text-center py-4 text-white/70">No data available</div>}
-          </div>
-        </section>
-      </div>
     </section>
   );
 }
@@ -4386,7 +4503,8 @@ function ModuleCrudPage({
   csvFile,
   csvColumns,
   templatePath,
-  templateLabel = "Download CSV template"
+  templateLabel = "Download CSV template",
+  currentUserName = ""
 }) {
   const PAGE_SIZE = 8;
   const [status, setStatus] = useState("Ready");
@@ -4396,14 +4514,33 @@ function ModuleCrudPage({
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [stageOptions, setStageOptions] = useState([]);
+  const [taskOptions, setTaskOptions] = useState([]);
+
+  const fieldSignature = useMemo(
+    () =>
+      fields
+        .map((field) =>
+          [
+            field.key,
+            field.apiKey || "",
+            field.defaultValue ?? "",
+            field.autoValue || "",
+            field.type || "",
+            field.optionsFrom || "",
+            Array.isArray(field.options) ? field.options.join("/") : ""
+          ].join(":")
+        )
+        .join("|"),
+    [fields]
+  );
 
   const initialForm = useMemo(
     () =>
       fields.reduce((acc, field) => {
-        acc[field.key] = field.defaultValue ?? "";
+        acc[field.key] = field.autoValue === "currentUserName" ? currentUserName : field.defaultValue ?? "";
         return acc;
       }, {}),
-    [fields]
+    [fieldSignature, currentUserName]
   );
 
   const [form, setForm] = useState(initialForm);
@@ -4447,6 +4584,11 @@ function ModuleCrudPage({
 
   const hasStageOptionField = useMemo(
     () => fields.some((field) => field.optionsFrom === "stages"),
+    [fields]
+  );
+
+  const hasTaskOptionField = useMemo(
+    () => fields.some((field) => field.optionsFrom === "plan-boq"),
     [fields]
   );
 
@@ -4522,6 +4664,35 @@ function ModuleCrudPage({
     }
   }, [fields, form, hasStageOptionField, stageOptions]);
 
+  useEffect(() => {
+    const loadTaskOptions = async () => {
+      if (!hasTaskOptionField || !selectedProjectId) {
+        setTaskOptions([]);
+        return;
+      }
+      try {
+        const data = await apiRequest(`/projects/${selectedProjectId}/plan-boq`, token);
+        const rows = Array.isArray(data) ? data : [];
+        const parentWbsSet = new Set(rows.map((row) => String(row.parent_wbs_code || "").trim()).filter(Boolean));
+        const normalized = rows
+          .filter((row) => {
+            const wbs = String(row.wbs_code || "").trim();
+            return !wbs || !parentWbsSet.has(wbs);
+          })
+          .map((task) => ({
+            value: String(task.id),
+            label: `${task.wbs_code || `Task #${task.id}`} - ${task.item_name || "Untitled task"}${task.stage_name ? ` (${task.stage_name})` : ""}`
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+        setTaskOptions(normalized);
+      } catch (_error) {
+        setTaskOptions([]);
+      }
+    };
+
+    loadTaskOptions();
+  }, [hasTaskOptionField, selectedProjectId, token]);
+
   const loadRows = useCallback(async () => {
     if (!selectedProjectId) {
       setRows([]);
@@ -4566,7 +4737,7 @@ function ModuleCrudPage({
     const payload = {};
     fields.forEach((field) => {
       const apiKey = field.apiKey || field.key;
-      const value = form[field.key];
+      const value = field.autoValue === "currentUserName" ? currentUserName : form[field.key];
       if (value === "") {
         payload[apiKey] = null;
       } else if (field.type === "number") {
@@ -4576,7 +4747,7 @@ function ModuleCrudPage({
       }
     });
     return payload;
-  }, [fields, form]);
+  }, [currentUserName, fields, form]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -4842,10 +5013,11 @@ function ModuleCrudPage({
 
         {endpoint === "plan-boq" && (
           <div className="mb-4 rounded-xl border border-cyan-100 bg-cyan-50 p-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-cyan-700">Smart WBS Gantt chart</p>
+            <div className="mb-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">Work Schedule Timeline</p>
+              <p className="text-[11px] text-cyan-800">Parent WBS rows summarize their child tasks; expand a group to review detailed execution items.</p>
+            </div>
             <SmartGanttBoard rows={rows} />
-            <div className="mt-2 text-[11px] text-cyan-800">Supports parent-child WBS, FS/FF/SS/SF dependencies, and delayed progress alerts on timeline.</div>
-            <div className="mt-2"><MiniGanttChart rows={rows} /></div>
           </div>
         )}
 
@@ -4892,7 +5064,7 @@ function ModuleCrudPage({
             ))}
           </select>
 
-          {fields.map((field) => (
+          {fields.filter((field) => !field.hiddenInForm).map((field) => (
             <label key={field.key} className="grid gap-1 text-xs font-medium text-graphite/70">
               <span>{field.label}</span>
               {field.type === "select" ? (
@@ -4901,13 +5073,14 @@ function ModuleCrudPage({
                   value={form[field.key]}
                   onChange={(e) => setForm((prev) => ({ ...prev, [field.key]: e.target.value }))}
                 >
+                  {field.allowEmpty && <option value="">{field.emptyLabel || "None"}</option>}
                   {((field.optionsFrom === "stages"
-                    ? stageOptions.map((option) => option.value)
-                    : field.options || [])).map((option) => (
-                    <option key={option} value={option}>
-                      {field.optionsFrom === "stages"
-                        ? stageOptions.find((stageOption) => stageOption.value === option)?.label || option
-                        : option}
+                    ? stageOptions
+                    : field.optionsFrom === "plan-boq"
+                      ? taskOptions
+                      : (field.options || []).map((option) => ({ value: option, label: option })))).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label || option.value}
                     </option>
                   ))}
                 </select>
@@ -4990,6 +5163,8 @@ function EquipmentFleetPage({ token, projects }) {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [assets, setAssets] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [allocatedDrivers, setAllocatedDrivers] = useState([]);
+  const [selectedDriverUserId, setSelectedDriverUserId] = useState("");
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [editingAssetId, setEditingAssetId] = useState(null);
   const [logTypeFilter, setLogTypeFilter] = useState("");
@@ -5030,8 +5205,25 @@ function EquipmentFleetPage({ token, projects }) {
     }
   }, [selectedProjectId, projects]);
 
+  const selectedProject = useMemo(
+    () => projects.find((project) => String(project.id) === String(selectedProjectId)) || null,
+    [projects, selectedProjectId]
+  );
+
+  const fillDriverFromAllocation = useCallback((driver) => {
+    if (!driver) return;
+    setSelectedDriverUserId(driver.userId ? String(driver.userId) : "");
+    setAssetForm((prev) => ({
+      ...prev,
+      driverName: driver.fullName || "",
+      driverCode: driver.employeeCode || "",
+      driverPhone: driver.phone || ""
+    }));
+  }, []);
+
   const resetAssetForm = () => {
     setEditingAssetId(null);
+    setSelectedDriverUserId("");
     setAssetForm({
       licensePlate: "",
       equipmentType: "",
@@ -5090,6 +5282,65 @@ function EquipmentFleetPage({ token, projects }) {
     }
   }, [selectedProjectId, selectedAssetId, token]);
 
+  const loadAllocatedDrivers = useCallback(async () => {
+    if (!selectedProjectId) {
+      setAllocatedDrivers([]);
+      return;
+    }
+
+    const todayText = new Date().toISOString().slice(0, 10);
+    const fromText = selectedProject?.start_date ? String(selectedProject.start_date).slice(0, 10) : todayText;
+    const toText = selectedProject?.end_date ? String(selectedProject.end_date).slice(0, 10) : todayText;
+
+    try {
+      const rows = await apiRequest(
+        `/projects/work-schedules/export?projectId=${encodeURIComponent(selectedProjectId)}&from=${encodeURIComponent(fromText)}&to=${encodeURIComponent(toText)}`,
+        token
+      );
+      const byUser = new Map();
+      (Array.isArray(rows) ? rows : [])
+        .filter((row) => {
+          const tradeCode = String(row.tradeCode || row.trade_code || "").toUpperCase();
+          const scheduleStatus = String(row.scheduleStatus || row.status || "").toUpperCase();
+          return tradeCode === "EQUIPMENT" && scheduleStatus !== "CANCELLED";
+        })
+        .forEach((row) => {
+        const userId = Number(row.userId || 0);
+        if (!Number.isFinite(userId) || userId <= 0) return;
+        const workDate = row.workDate ? String(row.workDate).slice(0, 10) : "";
+        const shiftCode = row.shiftCode || "";
+        const current = byUser.get(userId);
+        if (!current) {
+          byUser.set(userId, {
+            userId,
+            employeeCode: row.employeeCode || "",
+            fullName: row.fullName || "",
+            phone: row.phone || "",
+            jobTitle: row.jobTitle || row.job_title || "",
+            tradeCode: row.tradeCode || row.trade_code || "",
+            skillLevel: row.skillLevel || row.skill_level || "",
+            specialization: row.specialization || "",
+            fromDate: workDate,
+            toDate: workDate,
+            scheduleCount: 1,
+            shiftCodes: new Set(shiftCode ? [shiftCode] : [])
+          });
+          return;
+        }
+        current.scheduleCount += 1;
+        if (workDate && (!current.fromDate || workDate < current.fromDate)) current.fromDate = workDate;
+        if (workDate && (!current.toDate || workDate > current.toDate)) current.toDate = workDate;
+        if (shiftCode) current.shiftCodes.add(shiftCode);
+      });
+      const drivers = Array.from(byUser.values())
+        .map((driver) => ({ ...driver, shiftCodes: Array.from(driver.shiftCodes || []) }))
+        .sort((a, b) => String(a.employeeCode).localeCompare(String(b.employeeCode)));
+      setAllocatedDrivers(drivers);
+    } catch {
+      setAllocatedDrivers([]);
+    }
+  }, [selectedProject, selectedProjectId, token]);
+
   const loadLogs = useCallback(async () => {
     if (!selectedProjectId || !selectedAssetId) {
       setLogs([]);
@@ -5114,6 +5365,16 @@ function EquipmentFleetPage({ token, projects }) {
   useEffect(() => {
     loadAssets();
   }, [loadAssets]);
+
+  useEffect(() => {
+    loadAllocatedDrivers();
+  }, [loadAllocatedDrivers]);
+
+  useEffect(() => {
+    if (!editingAssetId && !assetForm.driverName && !assetForm.driverCode && allocatedDrivers.length === 1) {
+      fillDriverFromAllocation(allocatedDrivers[0]);
+    }
+  }, [allocatedDrivers, assetForm.driverCode, assetForm.driverName, editingAssetId, fillDriverFromAllocation]);
 
   useEffect(() => {
     loadLogs();
@@ -5195,6 +5456,8 @@ function EquipmentFleetPage({ token, projects }) {
   const editAsset = (item) => {
     setEditingAssetId(item.id);
     setSelectedAssetId(String(item.id));
+    const matchedDriver = allocatedDrivers.find((driver) => String(driver.employeeCode || "") === String(item.driver_code || ""));
+    setSelectedDriverUserId(matchedDriver ? String(matchedDriver.userId) : "");
     setAssetForm({
       licensePlate: item.license_plate || "",
       equipmentType: item.equipment_type || "",
@@ -5301,6 +5564,8 @@ function EquipmentFleetPage({ token, projects }) {
     return "bg-emerald-100 text-emerald-700";
   };
 
+  const hasSelectedAllocatedDriver = Boolean(selectedDriverUserId);
+
   return (
     <section className="space-y-4">
       {status && !["Ready", "Equipment data loaded"].includes(status) && (
@@ -5323,7 +5588,7 @@ function EquipmentFleetPage({ token, projects }) {
                 <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
               ))}
             </select>
-            <button type="button" onClick={loadAssets} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">Reload</button>
+            <button type="button" onClick={() => { loadAssets(); loadAllocatedDrivers(); }} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">Reload</button>
           </div>
         </div>
 
@@ -5426,9 +5691,32 @@ function EquipmentFleetPage({ token, projects }) {
               <option value="LEASED">LEASED</option>
             </select>
 
-            <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" placeholder="Driver" value={assetForm.driverName} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverName: e.target.value }))} />
-            <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" placeholder="Driver code" value={assetForm.driverCode} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverCode: e.target.value }))} />
-            <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" placeholder="Driver phone" value={assetForm.driverPhone} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverPhone: e.target.value }))} />
+            <select
+              className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-2"
+              value={selectedDriverUserId}
+              onChange={(e) => {
+                const nextDriverUserId = e.target.value;
+                setSelectedDriverUserId(nextDriverUserId);
+                const driver = allocatedDrivers.find((item) => String(item.userId) === String(nextDriverUserId));
+                if (driver) {
+                  fillDriverFromAllocation(driver);
+                } else {
+                  setAssetForm((prev) => ({ ...prev, driverName: "", driverCode: "", driverPhone: "" }));
+                }
+              }}
+              disabled={allocatedDrivers.length === 0}
+            >
+              <option value="">{allocatedDrivers.length === 0 ? "No EQUIPMENT operators allocated from quota/schedule" : "Select EQUIPMENT operator from quota/schedule"}</option>
+              {allocatedDrivers.map((driver) => (
+                <option key={driver.userId} value={driver.userId}>
+                  {driver.employeeCode} - {driver.fullName} ({driver.jobTitle || driver.specialization || "EQUIPMENT"}{driver.fromDate ? `, ${driver.fromDate}${driver.toDate && driver.toDate !== driver.fromDate ? ` to ${driver.toDate}` : ""}` : ""}{driver.shiftCodes?.length ? `, ${driver.shiftCodes.join("/")}` : ""})
+                </option>
+              ))}
+            </select>
+
+            <input className={`rounded-lg border border-steel/20 px-3 py-2 text-sm ${hasSelectedAllocatedDriver ? "bg-slate-50 text-slate-600" : ""}`} placeholder="Driver" value={assetForm.driverName} readOnly={hasSelectedAllocatedDriver} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverName: e.target.value }))} />
+            <input className={`rounded-lg border border-steel/20 px-3 py-2 text-sm ${hasSelectedAllocatedDriver ? "bg-slate-50 text-slate-600" : ""}`} placeholder="Driver code" value={assetForm.driverCode} readOnly={hasSelectedAllocatedDriver} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverCode: e.target.value }))} />
+            <input className={`rounded-lg border border-steel/20 px-3 py-2 text-sm ${hasSelectedAllocatedDriver ? "bg-slate-50 text-slate-600" : ""}`} placeholder="Driver phone" value={assetForm.driverPhone} readOnly={hasSelectedAllocatedDriver} onChange={(e) => setAssetForm((prev) => ({ ...prev, driverPhone: e.target.value }))} />
             <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" list="equipment-rental-vendor-options" placeholder="Rental vendor" value={assetForm.rentalVendor} onChange={(e) => setAssetForm((prev) => ({ ...prev, rentalVendor: e.target.value }))} />
 
             <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={assetForm.status} onChange={(e) => setAssetForm((prev) => ({ ...prev, status: e.target.value }))}>
@@ -5612,11 +5900,13 @@ function ConstructionDiaryPage({ token, projects }) {
   const [status, setStatus] = useState("Ready");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [rows, setRows] = useState([]);
+  const [taskOptions, setTaskOptions] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const [viewingDiary, setViewingDiary] = useState(null);
 
   const [form, setForm] = useState({
     diaryCode: "",
+    taskId: "",
     diaryDate: "",
     title: "",
     sitePhotoData: "",
@@ -5662,10 +5952,40 @@ function ConstructionDiaryPage({ token, projects }) {
     loadRows();
   }, [loadRows]);
 
+  const loadTaskOptions = useCallback(async () => {
+    if (!selectedProjectId) {
+      setTaskOptions([]);
+      return;
+    }
+    try {
+      const data = await apiRequest(`/projects/${selectedProjectId}/plan-boq`, token);
+      const taskRows = Array.isArray(data) ? data : [];
+      const parentWbsSet = new Set(taskRows.map((task) => String(task.parent_wbs_code || "").trim()).filter(Boolean));
+      const options = taskRows
+        .filter((task) => {
+          const wbs = String(task.wbs_code || "").trim();
+          return !wbs || !parentWbsSet.has(wbs);
+        })
+        .map((task) => ({
+          value: String(task.id),
+          label: `${task.wbs_code || `Task #${task.id}`} - ${task.item_name || "Untitled task"}${task.stage_name ? ` (${task.stage_name})` : ""}`
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+      setTaskOptions(options);
+    } catch (_error) {
+      setTaskOptions([]);
+    }
+  }, [selectedProjectId, token]);
+
+  useEffect(() => {
+    loadTaskOptions();
+  }, [loadTaskOptions]);
+
   const resetForm = () => {
     setEditingId(null);
     setForm({
       diaryCode: "",
+      taskId: "",
       diaryDate: "",
       title: "",
       sitePhotoData: "",
@@ -5715,6 +6035,7 @@ function ConstructionDiaryPage({ token, projects }) {
     const weatherParts = [form.weatherMorning, form.weatherAfternoon, form.weatherEvening, form.weatherNight].filter(Boolean);
     const payload = {
       diaryCode: form.diaryCode || null,
+      taskId: form.taskId || null,
       diaryDate: form.diaryDate || null,
       title: form.title || form.diaryCode || "Construction diary",
       sitePhotoData: form.sitePhotoData || null,
@@ -5757,6 +6078,7 @@ function ConstructionDiaryPage({ token, projects }) {
     setEditingId(row.id);
     setForm({
       diaryCode: row.diary_code || "",
+      taskId: row.task_id ? String(row.task_id) : "",
       diaryDate: row.diary_date ? String(row.diary_date).slice(0, 10) : "",
       title: row.title || "",
       sitePhotoData: row.site_photo_data || "",
@@ -5835,6 +6157,14 @@ function ConstructionDiaryPage({ token, projects }) {
         </div>
 
         <div className="grid gap-3 md:grid-cols-3">
+          <label className="text-xs font-medium text-graphite/70 md:col-span-3">Related task
+            <select className="mt-1 w-full rounded-lg border border-steel/20 px-3 py-2 text-sm" value={form.taskId} onChange={(e) => setForm((prev) => ({ ...prev, taskId: e.target.value }))}>
+              <option value="">No related task</option>
+              {taskOptions.map((task) => (
+                <option key={task.value} value={task.value}>{task.label}</option>
+              ))}
+            </select>
+          </label>
           <label className="text-xs font-medium text-graphite/70">Diary code
             <input className="mt-1 w-full rounded-lg border border-steel/20 px-3 py-2 text-sm" placeholder="NK-CT-0001" value={form.diaryCode} onChange={(e) => setForm((prev) => ({ ...prev, diaryCode: e.target.value }))} />
           </label>
@@ -5939,6 +6269,7 @@ function ConstructionDiaryPage({ token, projects }) {
                 "manager-construction-diary.csv",
                 [
                   { key: "diary_code", label: "Diary code" },
+                  { key: "task_label", label: "Related task" },
                   { key: "diary_date", label: "Date" },
                   { key: "title", label: "Title" },
                   { key: "weather", label: "Weather" },
@@ -5963,6 +6294,7 @@ function ConstructionDiaryPage({ token, projects }) {
               <th className="p-2 font-semibold text-steel">Code</th>
               <th className="p-2 font-semibold text-steel">Date</th>
               <th className="p-2 font-semibold text-steel">Information</th>
+              <th className="p-2 font-semibold text-steel">Task</th>
               <th className="p-2 font-semibold text-steel">Evaluation</th>
               <th className="p-2 font-semibold text-steel">Status</th>
               <th className="p-2 font-semibold text-steel">Actions</th>
@@ -5976,6 +6308,10 @@ function ConstructionDiaryPage({ token, projects }) {
                 <td className="p-2 text-graphite">
                   <p className="font-semibold">{row.title || "-"}</p>
                   <p className="text-xs text-graphite/60">{row.weather || "-"}</p>
+                </td>
+                <td className="p-2 text-graphite">
+                  <p className="text-xs font-semibold">{row.task_label || "-"}</p>
+                  {row.task_stage_name && <p className="text-[11px] text-graphite/60">{row.task_stage_name}</p>}
                 </td>
                 <td className="p-2 text-xs text-graphite">
                   <div className="flex flex-wrap gap-1">
@@ -6010,6 +6346,7 @@ function ConstructionDiaryPage({ token, projects }) {
               <div className="rounded-lg bg-steel/5 p-3 text-sm"><span className="font-semibold">Diary code:</span> {viewingDiary.diary_code || "-"}</div>
               <div className="rounded-lg bg-steel/5 p-3 text-sm"><span className="font-semibold">Date:</span> {formatDateDisplay(viewingDiary.diary_date)}</div>
               <div className="rounded-lg bg-steel/5 p-3 text-sm"><span className="font-semibold">Status:</span> {viewingDiary.status || "-"}</div>
+              <div className="rounded-lg bg-steel/5 p-3 text-sm md:col-span-3"><span className="font-semibold">Related task:</span> {viewingDiary.task_label || "-"}{viewingDiary.task_stage_name ? ` (${viewingDiary.task_stage_name})` : ""}</div>
             </div>
 
             <div className="mt-3 rounded-lg border border-steel/15 p-3">
@@ -6271,6 +6608,7 @@ function MaterialsInventoryPage({ token, projects }) {
         unitCost,
         plannedAmount: planned * unitCost,
         actualAmount: used * unitCost,
+        stockValue: stock * unitCost,
         importOver,
         exportOver,
         importOverPercent,
@@ -6390,6 +6728,8 @@ function MaterialsInventoryPage({ token, projects }) {
                     { key: "received", label: "Requested quantity" },
                     { key: "used", label: "Quantity theo KHTC" },
                     { key: "stock", label: "Stock" },
+                    { key: "unitCost", label: "Unit cost" },
+                    { key: "stockValue", label: "Stock value" },
                     { key: "plannedAmount", label: "Planned amount" },
                     { key: "actualAmount", label: "Actual amount" }
                   ],
@@ -6421,6 +6761,8 @@ function MaterialsInventoryPage({ token, projects }) {
               <th className="p-2 font-semibold text-steel text-right">Requested quantity</th>
               <th className="p-2 font-semibold text-steel text-right">Quantity theo KHTC</th>
               <th className="p-2 font-semibold text-steel text-right">Stock</th>
+              <th className="p-2 font-semibold text-steel text-right">Unit cost</th>
+              <th className="p-2 font-semibold text-steel text-right">Stock value</th>
               <th className="p-2 font-semibold text-steel text-right">Planned amount</th>
               <th className="p-2 font-semibold text-steel text-right">Actual amount</th>
               <th className="p-2 font-semibold text-steel">Warning</th>
@@ -6438,6 +6780,8 @@ function MaterialsInventoryPage({ token, projects }) {
                 <td className={`p-2 text-right ${row.importOver > 0 ? "text-red-600 font-semibold" : "text-graphite"}`}>{row.received.toFixed(2)}</td>
                 <td className={`p-2 text-right ${row.exportOver > 0 ? "text-red-600 font-semibold" : "text-graphite"}`}>{row.used.toFixed(2)}</td>
                 <td className={`p-2 text-right ${row.stock < 0 ? "text-red-600 font-semibold" : "text-graphite"}`}>{row.stock.toFixed(2)}</td>
+                <td className="p-2 text-right text-graphite">{Math.round(row.unitCost).toLocaleString()}</td>
+                <td className={`p-2 text-right ${row.stockValue < 0 ? "text-red-600 font-semibold" : "text-graphite"}`}>{Math.round(row.stockValue).toLocaleString()}</td>
                 <td className="p-2 text-right text-graphite">{Math.round(row.plannedAmount).toLocaleString()}</td>
                 <td className="p-2 text-right text-red-600">{Math.round(row.actualAmount).toLocaleString()}</td>
                 <td className="p-2">
@@ -6485,6 +6829,495 @@ function MaterialsInventoryPage({ token, projects }) {
         </table>
         {overUseWorkRows.length === 0 && <div className="py-4 text-center text-sm text-graphite/60">No over-plan items</div>}
       </section>
+    </section>
+  );
+}
+
+function DailyMaterialUsagePage({ token, projects }) {
+  const [status, setStatus] = useState("Ready");
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [materials, setMaterials] = useState([]);
+  const [stages, setStages] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({
+    materialId: "",
+    usageDate: new Date().toISOString().split("T")[0],
+    usedQty: "",
+    stageId: "",
+    wbsCode: "",
+    note: ""
+  });
+
+  useEffect(() => {
+    if (!selectedProjectId && projects[0]?.id) {
+      setSelectedProjectId(String(projects[0].id));
+    }
+  }, [projects, selectedProjectId]);
+
+  const selectedMaterial = useMemo(
+    () => materials.find((item) => String(item.id) === String(form.materialId)) || null,
+    [form.materialId, materials]
+  );
+
+  const wbsOptions = useMemo(
+    () => Array.from(new Set(tasks.map((task) => String(task.wbs_code || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [tasks]
+  );
+
+  const loadData = useCallback(async () => {
+    if (!selectedProjectId) {
+      setMaterials([]);
+      setStages([]);
+      setTasks([]);
+      setRows([]);
+      return;
+    }
+
+    try {
+      const [materialRows, stageRows, taskRows, usageRows] = await Promise.all([
+        apiRequest(`/projects/${selectedProjectId}/materials`, token),
+        apiRequest(`/projects/${selectedProjectId}/stages`, token),
+        apiRequest(`/projects/${selectedProjectId}/plan-boq`, token),
+        apiRequest(`/projects/${selectedProjectId}/material-usage`, token)
+      ]);
+
+      const normalizedMaterials = Array.isArray(materialRows) ? materialRows : [];
+      setMaterials(normalizedMaterials);
+      setStages(Array.isArray(stageRows) ? stageRows : []);
+      setTasks(Array.isArray(taskRows) ? taskRows : []);
+      setRows(Array.isArray(usageRows) ? usageRows : []);
+      setStatus("Daily usage loaded");
+
+      if (!form.materialId && normalizedMaterials[0]?.id) {
+        setForm((prev) => ({ ...prev, materialId: String(normalizedMaterials[0].id) }));
+      }
+    } catch (error) {
+      setStatus(`Failed to load daily usage: ${error.message}`);
+    }
+  }, [form.materialId, selectedProjectId, token]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setForm({
+      materialId: materials[0]?.id ? String(materials[0].id) : "",
+      usageDate: new Date().toISOString().split("T")[0],
+      usedQty: "",
+      stageId: "",
+      wbsCode: "",
+      note: ""
+    });
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!selectedProjectId || !form.materialId) {
+      setStatus("Please select project and material");
+      return;
+    }
+    if (Number(form.usedQty || 0) <= 0) {
+      setStatus("Used quantity must be greater than zero");
+      return;
+    }
+
+    const payload = {
+      materialId: Number(form.materialId),
+      usageDate: form.usageDate || null,
+      usedQty: Number(form.usedQty || 0),
+      stageId: form.stageId ? Number(form.stageId) : null,
+      wbsCode: form.wbsCode || null,
+      note: form.note || null
+    };
+
+    try {
+      if (editingId) {
+        await apiRequest(`/projects/${selectedProjectId}/material-usage/${editingId}`, token, { method: "PUT", body: payload });
+        setStatus("Daily usage updated");
+      } else {
+        await apiRequest(`/projects/${selectedProjectId}/material-usage`, token, { method: "POST", body: payload });
+        setStatus("Daily usage added");
+      }
+      resetForm();
+      loadData();
+    } catch (error) {
+      setStatus(`Save daily usage failed: ${error.message}`);
+    }
+  };
+
+  const editRow = (row) => {
+    setEditingId(row.id);
+    setForm({
+      materialId: row.material_id == null ? "" : String(row.material_id),
+      usageDate: row.usage_date ? String(row.usage_date).slice(0, 10) : "",
+      usedQty: row.used_qty == null ? "" : String(row.used_qty),
+      stageId: row.stage_id == null ? "" : String(row.stage_id),
+      wbsCode: row.wbs_code || "",
+      note: row.note || ""
+    });
+  };
+
+  const removeRow = async (id) => {
+    const ok = window.confirm("Delete this daily usage entry?");
+    if (!ok) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/projects/${selectedProjectId}/material-usage/${id}`, token, { method: "DELETE" });
+      setStatus("Daily usage deleted");
+      loadData();
+    } catch (error) {
+      setStatus(`Delete daily usage failed: ${error.message}`);
+    }
+  };
+
+  return (
+    <section className="space-y-4">
+      {status && !["Ready", "Daily usage loaded", "Daily usage added", "Daily usage updated", "Daily usage deleted"].includes(status) && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{status}</div>
+      )}
+
+      <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-lg font-bold text-steel">Daily Usage</h3>
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <form onSubmit={submit} className="grid gap-3 md:grid-cols-6">
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="date" value={form.usageDate} onChange={(event) => setForm((prev) => ({ ...prev, usageDate: event.target.value }))} />
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-2" value={form.materialId} onChange={(event) => setForm((prev) => ({ ...prev, materialId: event.target.value }))}>
+            <option value="">Material</option>
+            {materials.map((material) => (
+              <option key={material.id} value={material.id}>{material.material_name}</option>
+            ))}
+          </select>
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" step="0.01" placeholder="Used quantity today" value={form.usedQty} onChange={(event) => setForm((prev) => ({ ...prev, usedQty: event.target.value }))} />
+          <input className="rounded-lg border border-steel/20 bg-steel/5 px-3 py-2 text-sm" value={selectedMaterial?.unit || ""} placeholder="Unit" readOnly />
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={form.stageId} onChange={(event) => setForm((prev) => ({ ...prev, stageId: event.target.value }))}>
+            <option value="">Stage</option>
+            {stages.map((stage) => (
+              <option key={stage.id} value={stage.id}>{stage.stage_order}. {stage.stage_name}</option>
+            ))}
+          </select>
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" list="daily-usage-wbs-options" placeholder="WBS / work item" value={form.wbsCode} onChange={(event) => setForm((prev) => ({ ...prev, wbsCode: event.target.value }))} />
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-4" placeholder="Note" value={form.note} onChange={(event) => setForm((prev) => ({ ...prev, note: event.target.value }))} />
+          <div className="flex gap-2">
+            <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">{editingId ? "Update" : "Add usage"}</button>
+            <button type="button" onClick={resetForm} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">Clear</button>
+          </div>
+          <datalist id="daily-usage-wbs-options">
+            {wbsOptions.map((value) => (
+              <option key={value} value={value} />
+            ))}
+          </datalist>
+        </form>
+      </div>
+
+      <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft overflow-x-auto">
+        <div className="mb-3 flex items-center justify-between">
+          <h4 className="text-base font-bold text-steel">Daily Usage Records</h4>
+          <button type="button" onClick={loadData} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">Reload</button>
+        </div>
+        <table className="min-w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-steel/20 bg-steel/5">
+              <th className="p-2 font-semibold text-steel">Date</th>
+              <th className="p-2 font-semibold text-steel">Material</th>
+              <th className="p-2 font-semibold text-steel text-right">Used quantity today</th>
+              <th className="p-2 font-semibold text-steel">Unit</th>
+              <th className="p-2 font-semibold text-steel">Stage / WBS / work item</th>
+              <th className="p-2 font-semibold text-steel">Note</th>
+              <th className="p-2 font-semibold text-steel">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id} className="border-b border-steel/10">
+                <td className="p-2 text-graphite">{row.usage_date ? String(row.usage_date).slice(0, 10) : "-"}</td>
+                <td className="p-2 text-graphite">{row.material_name}</td>
+                <td className="p-2 text-right text-graphite">{Number(row.used_qty || 0).toFixed(2)}</td>
+                <td className="p-2 text-graphite">{row.unit || "-"}</td>
+                <td className="p-2 text-graphite">{row.stage_name || row.wbs_code || "-"}</td>
+                <td className="p-2 text-graphite">{row.note || "-"}</td>
+                <td className="p-2">
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => editRow(row)} className="rounded-lg bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-200">Edit</button>
+                    <button type="button" onClick={() => removeRow(row.id)} className="rounded-lg bg-red-100 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-200">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && <div className="py-5 text-center text-sm text-graphite/60">No daily usage records yet</div>}
+      </section>
+    </section>
+  );
+}
+
+function ProjectCostsPage({ token, projects }) {
+  const [status, setStatus] = useState("Ready");
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [costs, setCosts] = useState([]);
+  const [usageRows, setUsageRows] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({
+    category: "LABOR",
+    description: "",
+    amount: "",
+    incurredOn: new Date().toISOString().split("T")[0],
+    status: "DRAFT"
+  });
+  const costCategories = ["MATERIAL", "LABOR", "EQUIPMENT", "TRANSPORT", "SAFETY", "OTHER"];
+  const costStatuses = ["DRAFT", "APPROVED", "PAID"];
+  const money = (value) => `${Math.round(Number(value || 0)).toLocaleString("en-US")} VND`;
+
+  useEffect(() => {
+    if (!selectedProjectId && projects[0]?.id) {
+      setSelectedProjectId(String(projects[0].id));
+    }
+  }, [projects, selectedProjectId]);
+
+  const loadData = useCallback(async () => {
+    if (!selectedProjectId) {
+      setCosts([]);
+      setUsageRows([]);
+      return;
+    }
+    try {
+      const [costRows, materialUsageRows] = await Promise.all([
+        apiRequest(`/projects/${selectedProjectId}/costs`, token),
+        apiRequest(`/projects/${selectedProjectId}/material-usage`, token)
+      ]);
+      setCosts(Array.isArray(costRows) ? costRows : []);
+      setUsageRows(Array.isArray(materialUsageRows) ? materialUsageRows : []);
+      setStatus("Costs loaded");
+    } catch (error) {
+      setStatus(`Failed to load costs: ${error.message}`);
+    }
+  }, [selectedProjectId, token]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setForm({
+      category: "LABOR",
+      description: "",
+      amount: "",
+      incurredOn: new Date().toISOString().split("T")[0],
+      status: "DRAFT"
+    });
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!selectedProjectId) {
+      setStatus("Please select project");
+      return;
+    }
+    if (Number(form.amount || 0) <= 0) {
+      setStatus("Amount must be greater than zero");
+      return;
+    }
+    const payload = {
+      category: form.category,
+      description: form.description || null,
+      amount: Number(form.amount || 0),
+      incurredOn: form.incurredOn || null,
+      status: form.status
+    };
+
+    try {
+      if (editingId) {
+        await apiRequest(`/projects/${selectedProjectId}/costs/${editingId}`, token, { method: "PUT", body: payload });
+        setStatus("Cost updated");
+      } else {
+        await apiRequest(`/projects/${selectedProjectId}/costs`, token, { method: "POST", body: payload });
+        setStatus("Cost added");
+      }
+      resetForm();
+      loadData();
+    } catch (error) {
+      setStatus(`Save cost failed: ${error.message}`);
+    }
+  };
+
+  const editRow = (row) => {
+    setEditingId(row.id);
+    setForm({
+      category: row.category || "OTHER",
+      description: row.description || "",
+      amount: row.amount == null ? "" : String(row.amount),
+      incurredOn: row.incurred_on ? String(row.incurred_on).slice(0, 10) : "",
+      status: costStatuses.includes(row.status) ? row.status : "DRAFT"
+    });
+  };
+
+  const removeRow = async (id) => {
+    const ok = window.confirm("Delete this cost entry?");
+    if (!ok) {
+      return;
+    }
+    try {
+      await apiRequest(`/projects/${selectedProjectId}/costs/${id}`, token, { method: "DELETE" });
+      setStatus("Cost deleted");
+      loadData();
+    } catch (error) {
+      setStatus(`Delete cost failed: ${error.message}`);
+    }
+  };
+
+  const materialCost = useMemo(
+    () => usageRows.reduce((sum, row) => sum + Number(row.used_qty || 0) * Number(row.unit_cost || 0), 0),
+    [usageRows]
+  );
+
+  const summary = useMemo(() => {
+    const base = {
+      MATERIAL: materialCost,
+      LABOR: 0,
+      EQUIPMENT: 0,
+      TRANSPORT: 0,
+      SAFETY: 0,
+      OTHER: 0
+    };
+    costs.forEach((row) => {
+      const category = costCategories.includes(row.category) ? row.category : "OTHER";
+      base[category] += Number(row.amount || 0);
+    });
+    const total = Object.values(base).reduce((sum, value) => sum + Number(value || 0), 0);
+    return { ...base, total };
+  }, [costCategories, costs, materialCost]);
+
+  return (
+    <section className="space-y-4">
+      {status && !["Ready", "Costs loaded", "Cost added", "Cost updated", "Cost deleted"].includes(status) && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{status}</div>
+      )}
+
+      <div className="rounded-2xl border border-steel/15 bg-white p-5 shadow-soft">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-lg font-bold text-steel">Project Costs</h3>
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>{project.project_code} - {project.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mb-4 grid gap-3 md:grid-cols-4 xl:grid-cols-7">
+          {costCategories.map((category) => (
+            <div key={category} className="rounded-xl border border-steel/15 bg-steel/5 p-3">
+              <p className="text-xs text-graphite/60">{category === "MATERIAL" ? "Material cost" : `${category.charAt(0)}${category.slice(1).toLowerCase()} cost`}</p>
+              <p className="mt-1 text-sm font-bold text-steel">{money(summary[category])}</p>
+            </div>
+          ))}
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+            <p className="text-xs text-emerald-700">Total cost</p>
+            <p className="mt-1 text-sm font-bold text-emerald-800">{money(summary.total)}</p>
+          </div>
+        </div>
+
+        <form onSubmit={submit} className="grid gap-3 md:grid-cols-6">
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={form.category} onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}>
+            {costCategories.map((category) => (
+              <option key={category} value={category}>{category}</option>
+            ))}
+          </select>
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm md:col-span-2" placeholder="Description" value={form.description} onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))} />
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="number" step="0.01" placeholder="Amount" value={form.amount} onChange={(event) => setForm((prev) => ({ ...prev, amount: event.target.value }))} />
+          <input className="rounded-lg border border-steel/20 px-3 py-2 text-sm" type="date" value={form.incurredOn} onChange={(event) => setForm((prev) => ({ ...prev, incurredOn: event.target.value }))} />
+          <select className="rounded-lg border border-steel/20 px-3 py-2 text-sm" value={form.status} onChange={(event) => setForm((prev) => ({ ...prev, status: event.target.value }))}>
+            {costStatuses.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+          <div className="flex gap-2 md:col-span-6">
+            <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">{editingId ? "Update cost" : "Add cost"}</button>
+            <button type="button" onClick={resetForm} className="rounded-lg border border-steel/20 px-4 py-2 text-sm">Clear</button>
+            <button type="button" onClick={loadData} className="rounded-lg bg-steel px-3 py-2 text-xs font-semibold text-white hover:bg-steel/90">Reload</button>
+          </div>
+        </form>
+      </div>
+
+      <section className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft overflow-x-auto">
+        <table className="min-w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-steel/20 bg-steel/5">
+              <th className="p-2 font-semibold text-steel">Date</th>
+              <th className="p-2 font-semibold text-steel">Category</th>
+              <th className="p-2 font-semibold text-steel">Description</th>
+              <th className="p-2 font-semibold text-steel text-right">Amount</th>
+              <th className="p-2 font-semibold text-steel">Status</th>
+              <th className="p-2 font-semibold text-steel">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {costs.map((row) => (
+              <tr key={row.id} className="border-b border-steel/10">
+                <td className="p-2 text-graphite">{row.incurred_on ? String(row.incurred_on).slice(0, 10) : "-"}</td>
+                <td className="p-2 text-graphite">{row.category || "-"}</td>
+                <td className="p-2 text-graphite">{row.description || "-"}</td>
+                <td className="p-2 text-right text-graphite">{money(row.amount)}</td>
+                <td className="p-2">
+                  <span className="rounded-full bg-steel/10 px-2 py-1 text-[10px] font-semibold text-steel">{row.status || "DRAFT"}</span>
+                </td>
+                <td className="p-2">
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => editRow(row)} className="rounded-lg bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-200">Edit</button>
+                    <button type="button" onClick={() => removeRow(row.id)} className="rounded-lg bg-red-100 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-200">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {costs.length === 0 && <div className="py-5 text-center text-sm text-graphite/60">No project cost entries yet</div>}
+      </section>
+    </section>
+  );
+}
+
+function MaterialsCostControlPage({ token, projects }) {
+  const [activeTab, setActiveTab] = useState("inventory");
+  const tabs = [
+    { key: "inventory", label: "Inventory" },
+    { key: "daily", label: "Daily Usage" },
+    { key: "costs", label: "Project Costs" }
+  ];
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-2xl border border-steel/15 bg-white p-4 shadow-soft">
+        <h2 className="text-xl font-bold text-steel">Materials & Cost Control</h2>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold ${activeTab === tab.key ? "bg-steel text-white" : "bg-steel/10 text-graphite hover:bg-steel/15"}`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {activeTab === "inventory" && <MaterialsInventoryPage token={token} projects={projects} />}
+      {activeTab === "daily" && <DailyMaterialUsagePage token={token} projects={projects} />}
+      {activeTab === "costs" && <ProjectCostsPage token={token} projects={projects} />}
     </section>
   );
 }
@@ -7156,29 +7989,39 @@ function ProjectDashboardPage({ token, projects, onNavigate }) {
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm xl:col-span-2 overflow-x-auto">
           <div className="mb-3 flex items-center justify-between">
-            <h4 className="text-sm font-bold text-slate-700">Task board</h4>
+            <h4 className="text-sm font-bold text-slate-700">Per-task execution report</h4>
             <button type="button" onClick={() => onNavigate("quantity")} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700">Open Plan & BoQ</button>
           </div>
           <table className="min-w-full text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
                 <th className="p-2 font-semibold text-slate-700">Task</th>
-                <th className="p-2 font-semibold text-slate-700">Type</th>
-                <th className="p-2 font-semibold text-slate-700">Qty</th>
+                <th className="p-2 font-semibold text-slate-700">WBS</th>
+                <th className="p-2 font-semibold text-slate-700">Start date</th>
+                <th className="p-2 font-semibold text-slate-700">End date</th>
                 <th className="p-2 font-semibold text-slate-700">Status</th>
+                <th className="p-2 font-semibold text-slate-700 text-right">Progress</th>
               </tr>
             </thead>
             <tbody>
-              {planBoqRows.slice(0, 12).map((row) => (
-                <tr key={row.id} className="border-b border-slate-100">
-                  <td className="p-2 text-slate-700">{row.item_name}</td>
-                  <td className="p-2 text-slate-500">{row.item_type}</td>
-                  <td className="p-2 text-slate-500">{row.quantity}</td>
-                  <td className="p-2">
-                    <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">{row.status}</span>
-                  </td>
-                </tr>
-              ))}
+              {planBoqRows.slice(0, 12).map((row) => {
+                const status = String(row.status || "PLANNED").toUpperCase();
+                const progressValue = status === "DONE" ? 100 : status === "IN_PROGRESS" ? 65 : status === "PAUSED" ? 25 : 10;
+                return (
+                  <tr key={row.id} className="border-b border-slate-100">
+                    <td className="p-2 text-slate-700">{row.item_name}</td>
+                    <td className="p-2 text-slate-500">{row.wbs_code || "-"}</td>
+                    <td className="p-2 text-slate-500">{row.planned_date ? String(row.planned_date).slice(0, 10) : "-"}</td>
+                    <td className="p-2 text-slate-500">{row.actual_end_date ? String(row.actual_end_date).slice(0, 10) : row.planned_end_date ? String(row.planned_end_date).slice(0, 10) : "-"}</td>
+                    <td className="p-2">
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">{status}</span>
+                    </td>
+                    <td className="p-2 text-right">
+                      <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">{progressValue}%</span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {planBoqRows.length === 0 && <div className="py-6 text-center text-sm text-slate-500">No tasks found for this project</div>}
@@ -7211,7 +8054,7 @@ function ProjectDashboardPage({ token, projects, onNavigate }) {
   );
 }
 
-export default function ManagerWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
+export default function ManagerWorkspace({ token, profile, notificationControl, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
   const [projects, setProjects] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -7232,14 +8075,12 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
       { key: "attendance", label: "Real-time Attendance Dashboard" },
       { key: "requests", label: "Request Management" },
       { key: "progress", label: "Progress" },
-      { key: "gps-location", label: "GPS Location" },
-      { key: "materials", label: "Materials & Planning" },
+      { key: "materials", label: "Materials & Cost Control" },
       { key: "quantity", label: "Quantity" },
       { key: "workforce", label: "Workforce" },
       { key: "equipment", label: "Equipment" },
       { key: "diary", label: "Construction Diary" },
       { key: "rfx", label: "RFx" },
-      { key: "cost", label: "Project Budget" },
       { key: "dashboard", label: "Dashboard & Reports" },
       { key: "project-management", label: "Project Management" }
     ],
@@ -7249,10 +8090,49 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
   const [activePage, setActivePage] = useState("attendance");
 
   return (
-    <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
-      <aside className="lg:sticky lg:top-0 lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
+    <section className="h-full overflow-auto p-3 lg:grid lg:grid-cols-[320px_1fr] lg:gap-6 lg:p-0">
+      <div className="sticky top-0 z-[650] mb-3 rounded-2xl border border-white/50 bg-white/90 p-3 shadow-lg backdrop-blur-md lg:hidden">
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-steel">Project Management</h2>
+            <p className="text-xs text-graphite/60">Hello, {profile?.fullName || "Manager"}</p>
+          </div>
+          {notificationControl}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <select
+            className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm font-semibold text-steel"
+            value={activePage}
+            onChange={(event) => setActivePage(event.target.value)}
+          >
+            {menuItems.map((item) => (
+              <option key={item.key} value={item.key}>{item.label}</option>
+            ))}
+          </select>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+              className="w-full rounded-xl bg-gradient-to-r from-steel to-emerald-600 px-3 py-2 text-sm font-semibold text-white sm:w-auto"
+            >
+              Account
+            </button>
+            {accountMenuOpen && (
+              <div className="absolute right-0 top-full z-[750] mt-2 w-48 rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button type="button" onClick={() => { onOpenProfileModal(); setAccountMenuOpen(false); }} className="w-full rounded-t-lg px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Edit Profile</button>
+                <button type="button" onClick={() => { onOpenPasswordModal(); setAccountMenuOpen(false); }} className="w-full px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Change Password</button>
+                <button type="button" onClick={() => { onOpenLogoutModal(); setAccountMenuOpen(false); }} className="w-full rounded-b-lg px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50">Sign Out</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <aside className="hidden lg:sticky lg:top-0 lg:block lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
         <div className="mb-6 pb-4 border-b border-steel/10">
-          <h2 className="text-xl font-bold text-steel mb-2">Project Management</h2>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <h2 className="text-xl font-bold text-steel">Project Management</h2>
+            {notificationControl}
+          </div>
           <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "Manager"}</p>
           <div className="mt-3 relative">
             <button
@@ -7318,11 +8198,9 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
           })}
         </nav>
       </aside>
-      <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
+      <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-3 overflow-auto lg:p-6">
         {activePage === "progress" && <ProgressPage token={token} projects={projects} />}
-        {activePage === "gps-location" && <GPSLocationPage token={token} projects={projects} />}
-        {activePage === "diary" && <DiaryPage token={token} projects={projects} />}
-        {activePage === "materials" && <MaterialsPage token={token} projects={projects} />}
+        {activePage === "materials" && <MaterialsCostControlPage token={token} projects={projects} />}
         {activePage === "attendance" && (
           <TrackingPage
             token={token}
@@ -7334,7 +8212,7 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
           />
         )}
         {activePage === "requests" && <PMFieldApprovalsPage token={token} />}
-        {activePage === "materials-inventory" && <MaterialsInventoryPage token={token} projects={projects} />}
+        {activePage === "materials-inventory" && <MaterialsCostControlPage token={token} projects={projects} />}
         {activePage === "quantity" && (
           <ModuleCrudPage
             token={token}
@@ -7353,7 +8231,6 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
               { key: "itemName", apiKey: "itemName", label: "Item" },
               { key: "unit", apiKey: "unit", label: "Unit" },
               { key: "quantity", apiKey: "quantity", label: "Quantity", type: "number", step: "0.01" },
-              { key: "unitCost", apiKey: "unitCost", label: "Unit cost", type: "number", step: "0.01" },
               { key: "plannedDate", apiKey: "plannedDate", label: "Planned date", type: "date" },
               { key: "plannedEndDate", apiKey: "plannedEndDate", label: "End date KH", type: "date" },
               { key: "actualDate", apiKey: "actualDate", label: "Actual date", type: "date" },
@@ -7371,7 +8248,6 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
               { key: "item_name", label: "Item" },
               { key: "unit", label: "Unit" },
               { key: "quantity", label: "Quantity" },
-              { key: "unit_cost", label: "Unit cost" },
               { key: "planned_date", label: "Planned date" },
               { key: "planned_end_date", label: "End date KH" },
               { key: "actual_date", label: "Actual date" },
@@ -7400,12 +8276,14 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
             endpoint="rfx"
             title="RFx (submittal, issue)"
             icon="⚠️"
+            currentUserName={profile?.fullName || profile?.email || "Current user"}
             fields={[
               { key: "rfxType", apiKey: "rfxType", label: "Type", type: "select", options: ["SUBMITTAL", "RFI", "ISSUE"], defaultValue: "RFI" },
+              { key: "taskId", apiKey: "taskId", label: "Related task", type: "select", optionsFrom: "plan-boq", sourceKey: "task_label", editSourceKey: "task_id", allowEmpty: true, emptyLabel: "No related task" },
               { key: "title", apiKey: "title", label: "Title" },
               { key: "priority", apiKey: "priority", label: "Priority", type: "select", options: ["LOW", "NORMAL", "HIGH", "CRITICAL"], defaultValue: "NORMAL" },
-              { key: "status", apiKey: "status", label: "Status", defaultValue: "OPEN" },
-              { key: "requestedBy", apiKey: "requestedBy", label: "Requested by" },
+              { key: "status", apiKey: "status", label: "Status", type: "select", options: ["OPEN", "IN_REVIEW", "APPROVED", "REJECTED", "RESOLVED", "CLOSED"], defaultValue: "OPEN" },
+              { key: "requestedBy", apiKey: "requestedBy", label: "Requested by", autoValue: "currentUserName", hiddenInForm: true },
               { key: "dueDate", apiKey: "dueDate", label: "Due date", type: "date" },
               { key: "resolvedOn", apiKey: "resolvedOn", label: "Resolved date", type: "date" },
               { key: "description", apiKey: "description", label: "Description" }
@@ -7413,6 +8291,7 @@ export default function ManagerWorkspace({ token, profile, onOpenProfileModal, o
             csvFile="manager-rfx.csv"
             csvColumns={[
               { key: "rfx_type", label: "Type" },
+              { key: "task_label", label: "Related task" },
               { key: "title", label: "Title" },
               { key: "priority", label: "Priority" },
               { key: "status", label: "Status" },

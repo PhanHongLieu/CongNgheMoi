@@ -1,6 +1,8 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
 
-const API_BASE = "http://localhost:8080/api";
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8080/api` : "http://localhost:8080/api");
 
 async function request(path, token, method = "GET", body) {
   const response = await fetch(`${API_BASE}${path}`, {

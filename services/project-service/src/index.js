@@ -6,15 +6,21 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
 const app = express();
-const port = Number(process.env.PROJECT_SERVICE_PORT || 3003);
+const port = Number(process.env.PORT || process.env.PROJECT_SERVICE_PORT || 3003);
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
@@ -32,6 +38,11 @@ const DEFAULT_STAGE_TEMPLATES = [
   "Acceptance"
 ];
 const STAGE_STATUSES = ["NOT_STARTED", "IN_PROGRESS", "COMPLETED"];
+const REMOVED_TRADE_CODES = new Set(["GEN", "CIVIL", "MEP", "SAFETY", "QA"]);
+
+function isRemovedTradeCode(value) {
+  return REMOVED_TRADE_CODES.has(String(value || "").trim().toUpperCase());
+}
 
 function normalizeShiftCode(input) {
   const value = String(input || "").trim().toUpperCase();
@@ -186,6 +197,13 @@ async function syncStageProgressFromTasks(projectId, db = pool) {
          )::int AS started_tasks
        FROM project_plan_boq_items
        WHERE project_id = $1
+         AND NOT EXISTS (
+           SELECT 1
+           FROM project_plan_boq_items child
+           WHERE child.project_id = project_plan_boq_items.project_id
+             AND COALESCE(child.parent_wbs_code, '') <> ''
+             AND COALESCE(child.parent_wbs_code, '') = COALESCE(project_plan_boq_items.wbs_code, '')
+         )
          AND stage_id IS NOT NULL
        GROUP BY stage_id
      )
@@ -236,6 +254,7 @@ async function syncStageProgressFromTasks(projectId, db = pool) {
 }
 
 async function syncProjectProgressFromStageTasks(projectId, db = pool) {
+  await syncPlanBoqParentStatuses(projectId, db);
   await syncStageProgressFromTasks(projectId, db);
   await enforceSequentialStageLocks(projectId, db);
   await recalculateProjectProgress(projectId, db);
@@ -257,6 +276,104 @@ function calculateDurationDays(startDate, endDate) {
 function isTaskCompleted(task) {
   const status = String(task.status || "").toUpperCase();
   return status === "DONE" || status === "COMPLETED" || Boolean(task.actual_end_date);
+}
+
+function normalizeWbsCode(value) {
+  return String(value || "").trim();
+}
+
+async function normalizeProjectTaskId(projectId, taskId, db = pool) {
+  if (taskId == null || taskId === "") {
+    return null;
+  }
+  const normalized = Number(taskId);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return null;
+  }
+  const existing = await db.query("SELECT id FROM project_plan_boq_items WHERE id = $1 AND project_id = $2", [normalized, projectId]);
+  if (existing.rowCount === 0) {
+    const error = new Error("taskId must belong to project");
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalized;
+}
+
+async function syncPlanBoqParentStatuses(projectId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT id, wbs_code, parent_wbs_code, status
+     FROM project_plan_boq_items
+     WHERE project_id = $1
+       AND COALESCE(wbs_code, '') <> ''`,
+    [projectId]
+  );
+
+  const byWbs = new Map();
+  const childrenByParent = new Map();
+  rows.forEach((row) => {
+    const wbs = normalizeWbsCode(row.wbs_code);
+    const parentWbs = normalizeWbsCode(row.parent_wbs_code);
+    if (wbs) {
+      byWbs.set(wbs, row);
+    }
+    if (parentWbs) {
+      if (!childrenByParent.has(parentWbs)) {
+        childrenByParent.set(parentWbs, []);
+      }
+      childrenByParent.get(parentWbs).push(row);
+    }
+  });
+
+  const nextStatuses = new Map();
+  const statusFor = (wbs, visiting = new Set()) => {
+    if (!wbs || visiting.has(wbs)) {
+      return "PLANNED";
+    }
+    if (nextStatuses.has(wbs)) {
+      return nextStatuses.get(wbs);
+    }
+    const task = byWbs.get(wbs);
+    if (!task) {
+      return "PLANNED";
+    }
+    const children = childrenByParent.get(wbs) || [];
+    if (children.length === 0) {
+      const leafStatus = String(task.status || "PLANNED").toUpperCase();
+      nextStatuses.set(wbs, leafStatus);
+      return leafStatus;
+    }
+
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(wbs);
+    const childStatuses = children.map((child) => statusFor(normalizeWbsCode(child.wbs_code), nextVisiting));
+    const allDone = childStatuses.every((status) => status === "DONE" || status === "COMPLETED");
+    const anyStarted = childStatuses.some((status) => ["IN_PROGRESS", "DONE", "COMPLETED"].includes(status));
+    const allPaused = childStatuses.every((status) => status === "PAUSED");
+    const parentStatus = allDone ? "DONE" : anyStarted ? "IN_PROGRESS" : allPaused ? "PAUSED" : "PLANNED";
+    nextStatuses.set(wbs, parentStatus);
+    return parentStatus;
+  };
+
+  for (const wbs of childrenByParent.keys()) {
+    statusFor(wbs);
+  }
+
+  for (const [wbs, nextStatus] of nextStatuses.entries()) {
+    if (!childrenByParent.has(wbs)) {
+      continue;
+    }
+    const task = byWbs.get(wbs);
+    if (!task || String(task.status || "").toUpperCase() === nextStatus) {
+      continue;
+    }
+    await db.query(
+      `UPDATE project_plan_boq_items
+       SET status = $1,
+           updated_at = NOW()
+       WHERE id = $2 AND project_id = $3`,
+      [nextStatus, task.id, projectId]
+    );
+  }
 }
 
 async function syncProjectProgressFromTasks(projectId, mode = "points", db = pool) {
@@ -324,6 +441,16 @@ async function syncProjectProgressFromTasks(projectId, mode = "points", db = poo
 
 async function ensureConstructionTables() {
   await pool.query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS progress_percent NUMERIC(6,2) NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS assignment_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_code VARCHAR(30)");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_start_time TIME");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS shift_end_time TIME");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS required_trade_code VARCHAR(30)");
+  await pool.query("ALTER TABLE project_assignments ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await pool.query("ALTER TABLE project_assignments DROP CONSTRAINT IF EXISTS project_assignments_assignment_status_check");
+  await pool.query(
+    "ALTER TABLE project_assignments ADD CONSTRAINT project_assignments_assignment_status_check CHECK (assignment_status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED'))"
+  );
   await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(40) NOT NULL DEFAULT 'SYSTEM'");
   await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL'");
   await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'UNREAD'");
@@ -449,6 +576,26 @@ async function ensureConstructionTables() {
       updated_at TIMESTAMP DEFAULT NOW()
     )`
   );
+
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS project_daily_material_usage (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      material_id INTEGER NOT NULL REFERENCES project_material_logs(id) ON DELETE CASCADE,
+      stage_id INTEGER,
+      usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      used_qty NUMERIC(14,2) NOT NULL DEFAULT 0,
+      wbs_code VARCHAR(80),
+      note TEXT,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
+
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_project_daily_material_usage_project_date ON project_daily_material_usage(project_id, usage_date)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_project_daily_material_usage_material ON project_daily_material_usage(material_id)");
 
   await pool.query(
     `CREATE TABLE IF NOT EXISTS project_resource_allocations (
@@ -585,6 +732,7 @@ async function ensureConstructionTables() {
     `CREATE TABLE IF NOT EXISTS project_construction_diaries (
       id SERIAL PRIMARY KEY,
       project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL,
       diary_code VARCHAR(80),
       diary_date DATE NOT NULL DEFAULT CURRENT_DATE,
       title VARCHAR(255) NOT NULL,
@@ -618,6 +766,7 @@ async function ensureConstructionTables() {
     `CREATE TABLE IF NOT EXISTS project_rfx_records (
       id SERIAL PRIMARY KEY,
       project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL,
       rfx_type VARCHAR(20) NOT NULL DEFAULT 'RFI' CHECK (rfx_type IN ('SUBMITTAL', 'RFI', 'ISSUE')),
       title VARCHAR(255) NOT NULL,
       priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'CRITICAL')),
@@ -708,6 +857,7 @@ async function ensureConstructionTables() {
   await pool.query("ALTER TABLE project_equipment_assets ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE'");
   await pool.query("ALTER TABLE project_equipment_assets ADD COLUMN IF NOT EXISTS note TEXT");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS diary_code VARCHAR(80)");
+  await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS site_photo_data TEXT");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS weather_morning VARCHAR(80)");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS weather_afternoon VARCHAR(80)");
@@ -723,6 +873,7 @@ async function ensureConstructionTables() {
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS proposal TEXT");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS report_watchers TEXT");
   await pool.query("ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS note TEXT");
+  await pool.query("ALTER TABLE project_rfx_records ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL");
   await pool.query("CREATE INDEX IF NOT EXISTS idx_project_equipment_assets_project ON project_equipment_assets(project_id)");
   await pool.query("CREATE INDEX IF NOT EXISTS idx_project_equipment_logs_project_equipment ON project_equipment_logs(project_id, equipment_id)");
 
@@ -751,6 +902,20 @@ async function ensureConstructionTables() {
   await pool.query("CREATE INDEX IF NOT EXISTS idx_project_stages_project_order ON project_stages(project_id, stage_order)");
 
   await seedDefaultStageTemplates(pool);
+  await Promise.all([
+    syncSerialSequence("projects"),
+    syncSerialSequence("project_stage_templates"),
+    syncSerialSequence("project_stages"),
+    syncSerialSequence("project_stage_assignments"),
+    syncSerialSequence("project_plan_boq_items"),
+    syncSerialSequence("project_equipment_assets"),
+    syncSerialSequence("project_equipment_logs"),
+    syncSerialSequence("project_construction_diaries"),
+    syncSerialSequence("project_rfx_records"),
+    syncSerialSequence("project_material_logs"),
+    syncSerialSequence("project_daily_material_usage"),
+    syncSerialSequence("project_cost_entries")
+  ]);
 }
 
 async function writeDataLog({ action, collection, recordId, username, metadata }) {
@@ -763,6 +928,76 @@ async function writeDataLog({ action, collection, recordId, username, metadata }
   } catch (error) {
     console.error("writeDataLog failed:", error.message);
   }
+}
+
+async function createNotification({ userId, senderUserId, title, message, notificationType = "SYSTEM", priority = "NORMAL", actionUrl = null }, db = pool) {
+  if (!userId || !title || !message) return;
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sender_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMP");
+  await db.query(
+    `INSERT INTO notifications (user_id, sender_user_id, notification_type, priority, title, message, action_url, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'UNREAD')`,
+    [
+      Number(userId),
+      senderUserId || null,
+      String(notificationType).slice(0, 40).toUpperCase(),
+      String(priority).slice(0, 20).toUpperCase(),
+      title,
+      message,
+      actionUrl
+    ]
+  );
+}
+
+async function notifyRoles(roles, notification, db = pool) {
+  const normalizedRoles = (Array.isArray(roles) ? roles : [roles]).map((role) => String(role || "").toUpperCase()).filter(Boolean);
+  if (normalizedRoles.length === 0) return;
+  const { rows } = await db.query(
+    `SELECT DISTINCT u.id
+     FROM users u
+     JOIN accounts a ON a.user_id = u.id
+     WHERE a.role = ANY($1::text[])
+       AND a.account_status = 'ACTIVE'
+       AND COALESCE(u.status, 'WORKING') = 'WORKING'`,
+    [normalizedRoles]
+  );
+  for (const row of rows) {
+    await createNotification({ ...notification, userId: row.id }, db);
+  }
+}
+
+async function syncSerialSequence(tableName, columnName = "id") {
+  if (!/^[a-z_][a-z0-9_]*$/.test(tableName) || !/^[a-z_][a-z0-9_]*$/.test(columnName)) {
+    throw new Error(`Invalid sequence target: ${tableName}.${columnName}`);
+  }
+
+  const sequenceResult = await pool.query(
+    "SELECT pg_get_serial_sequence($1, $2) AS sequence_name",
+    [`public.${tableName}`, columnName]
+  );
+  const sequenceName = sequenceResult.rows[0]?.sequence_name;
+  if (!sequenceName) {
+    return;
+  }
+
+  const maxResult = await pool.query(`SELECT COALESCE(MAX(${columnName}), 0)::int AS max_id FROM ${tableName}`);
+  const maxId = Number(maxResult.rows[0]?.max_id || 0);
+  await pool.query("SELECT setval($1, $2, $3)", [sequenceName, Math.max(maxId, 1), maxId > 0]);
+}
+
+async function recalculateMaterialUsedQuantity(materialId, db = pool) {
+  await db.query(
+    `UPDATE project_material_logs
+     SET used_qty = COALESCE((
+       SELECT SUM(used_qty)
+       FROM project_daily_material_usage
+       WHERE material_id = $1
+     ), 0),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [materialId]
+  );
 }
 
 function authenticate(req, res, next) {
@@ -977,7 +1212,7 @@ app.get("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER"
   }
 });
 
-app.post("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const { stageName, stageOrder, weight } = req.body;
@@ -1015,7 +1250,7 @@ app.post("/projects/:id(\\d+)/stages", authenticate, authorize("ADMIN", "MANAGER
   }
 });
 
-app.put("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.put("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const stageId = Number(req.params.stageId);
@@ -1080,7 +1315,7 @@ app.put("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize("AD
   }
 });
 
-app.delete("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.delete("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const stageId = Number(req.params.stageId);
@@ -1099,7 +1334,7 @@ app.delete("/projects/:id(\\d+)/stages/:stageId(\\d+)", authenticate, authorize(
   }
 });
 
-app.post("/projects/:id(\\d+)/stages/reorder", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/:id(\\d+)/stages/reorder", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   let inTransaction = false;
   try {
@@ -1169,7 +1404,7 @@ app.post("/projects/:id(\\d+)/stages/reorder", authenticate, authorize("ADMIN", 
   }
 });
 
-app.post("/projects/:id(\\d+)/stages/:stageId(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/:id(\\d+)/stages/:stageId(\\d+)/progress", authenticate, authorize("ADMIN", "MANAGER", "PROJECT_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   let inTransaction = false;
   try {
@@ -1270,23 +1505,25 @@ app.post("/projects/:id(\\d+)/stages/:stageId(\\d+)/progress", authenticate, aut
 app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
-    const { name, address, latitude, longitude, gpsRadiusMeters, gps_radius_meters, startDate, endDate, status } = req.body;
+    const { projectCode, project_code, name, address, latitude, longitude, gpsRadiusMeters, gps_radius_meters, startDate, endDate, status } = req.body;
     const gpsRadiusValue = gpsRadiusMeters ?? gps_radius_meters;
+    const projectCodeValue = projectCode ?? project_code;
 
     const result = await pool.query(
       `UPDATE projects
-       SET name = COALESCE($1, name),
-           address = COALESCE($2, address),
-           latitude = COALESCE($3, latitude),
-           longitude = COALESCE($4, longitude),
-           gps_radius_meters = COALESCE($5, gps_radius_meters),
-           start_date = COALESCE($6, start_date),
-           end_date = COALESCE($7, end_date),
-           status = COALESCE($8, status),
+       SET project_code = COALESCE($1, project_code),
+           name = COALESCE($2, name),
+           address = COALESCE($3, address),
+           latitude = COALESCE($4, latitude),
+           longitude = COALESCE($5, longitude),
+           gps_radius_meters = COALESCE($6, gps_radius_meters),
+           start_date = COALESCE($7, start_date),
+           end_date = COALESCE($8, end_date),
+           status = COALESCE($9, status),
            updated_at = NOW()
-       WHERE id = $9
+       WHERE id = $10
        RETURNING *`,
-      [name, address, latitude, longitude, gpsRadiusValue, startDate, endDate, status, projectId]
+      [projectCodeValue, name, address, latitude, longitude, gpsRadiusValue, startDate, endDate, status, projectId]
     );
 
     if (result.rowCount === 0) {
@@ -1299,7 +1536,7 @@ app.put("/projects/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "
       recordId: String(projectId),
       username: req.user.email,
       metadata: {
-        changedFields: ["name", "address", "latitude", "longitude", "gpsRadiusMeters", "gps_radius_meters", "startDate", "endDate", "status"].filter(
+        changedFields: ["projectCode", "project_code", "name", "address", "latitude", "longitude", "gpsRadiusMeters", "gps_radius_meters", "startDate", "endDate", "status"].filter(
           (field) => req.body[field] !== undefined
         )
       }
@@ -1366,9 +1603,22 @@ app.get("/projects/:id/assignments", authenticate, async (req, res) => {
 });
 
 app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  let inTransaction = false;
   try {
     const { userId, projectId, stageId, assignmentRole, workStart, workEnd, requiredTradeCode } = req.body;
-    if (!userId || !projectId || !stageId) {
+    const normalizedRequiredTradeCode = isRemovedTradeCode(requiredTradeCode) ? null : requiredTradeCode || null;
+    const normalizedUserId = Number(userId);
+    const normalizedProjectId = Number(projectId);
+    const normalizedStageId = Number(stageId);
+    if (
+      !Number.isInteger(normalizedUserId) ||
+      !Number.isInteger(normalizedProjectId) ||
+      !Number.isInteger(normalizedStageId) ||
+      normalizedUserId <= 0 ||
+      normalizedProjectId <= 0 ||
+      normalizedStageId <= 0
+    ) {
       return res.status(400).json({ message: "userId, projectId and stageId are required" });
     }
 
@@ -1376,7 +1626,7 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
       `SELECT id, status, is_locked
        FROM project_stages
        WHERE id = $1 AND project_id = $2`,
-      [Number(stageId), Number(projectId)]
+      [normalizedStageId, normalizedProjectId]
     );
 
     if (stageResult.rowCount === 0) {
@@ -1396,7 +1646,15 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
          work_end = EXCLUDED.work_end,
          updated_at = NOW()
        RETURNING *`,
-      [Number(userId), Number(projectId), Number(stageId), assignmentRole || null, workStart || null, workEnd || null]
+      [normalizedUserId, normalizedProjectId, normalizedStageId, assignmentRole || null, workStart || null, workEnd || null]
+    );
+
+    const context = await client.query(
+      `SELECT p.project_code, p.name AS project_name, ps.stage_name
+       FROM projects p
+       JOIN project_stages ps ON ps.project_id = p.id
+       WHERE p.id = $1 AND ps.id = $2`,
+      [normalizedProjectId, normalizedStageId]
     );
 
     await client.query(
@@ -1408,8 +1666,18 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
          work_start = EXCLUDED.work_start,
          work_end = EXCLUDED.work_end,
          required_trade_code = EXCLUDED.required_trade_code`,
-      [Number(userId), Number(projectId), assignmentRole || null, workStart || null, workEnd || null, requiredTradeCode || null]
+      [normalizedUserId, normalizedProjectId, assignmentRole || null, workStart || null, workEnd || null, normalizedRequiredTradeCode]
     );
+
+    await createNotification({
+      userId: normalizedUserId,
+      senderUserId: req.user.sub,
+      title: "Project assignment updated",
+      message: `You were assigned to ${context.rows[0]?.project_code || "project"} - ${context.rows[0]?.project_name || ""}${context.rows[0]?.stage_name ? `, stage ${context.rows[0].stage_name}` : ""}.`,
+      notificationType: "PROJECT_ASSIGNMENT",
+      priority: "NORMAL",
+      actionUrl: "/projects"
+    }, client);
 
     await client.query("COMMIT");
     inTransaction = false;
@@ -1419,7 +1687,7 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
       collection: "project-assignment",
       recordId: String(result.rows[0].id),
       username: req.user.email,
-      metadata: { userId: Number(userId), projectId: Number(projectId), stageId: Number(stageId) }
+      metadata: { userId: normalizedUserId, projectId: normalizedProjectId, stageId: normalizedStageId }
     });
 
     return res.status(201).json(result.rows[0]);
@@ -1434,9 +1702,18 @@ app.post("/projects/assignments", authenticate, authorize("PROJECT_MANAGER", "MA
 });
 
 app.delete("/projects/assignments/:id", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  let inTransaction = false;
   try {
     const assignmentId = Number(req.params.id);
-    const target = await client.query("SELECT user_id, project_id, stage_id FROM project_stage_assignments WHERE id = $1", [assignmentId]);
+    const target = await client.query(
+      `SELECT psa.user_id, psa.project_id, psa.stage_id, p.project_code, p.name AS project_name, ps.stage_name
+       FROM project_stage_assignments psa
+       JOIN projects p ON p.id = psa.project_id
+       JOIN project_stages ps ON ps.id = psa.stage_id
+       WHERE psa.id = $1`,
+      [assignmentId]
+    );
     if (target.rowCount === 0) {
       return res.status(404).json({ message: "Assignment not found" });
     }
@@ -1461,6 +1738,16 @@ app.delete("/projects/assignments/:id", authenticate, authorize("PROJECT_MANAGER
         [target.rows[0].user_id, target.rows[0].project_id]
       );
     }
+
+    await createNotification({
+      userId: target.rows[0].user_id,
+      senderUserId: req.user.sub,
+      title: "Project assignment removed",
+      message: `Your assignment in ${target.rows[0].project_code || "project"} - ${target.rows[0].project_name || ""}${target.rows[0].stage_name ? `, stage ${target.rows[0].stage_name}` : ""} was removed.`,
+      notificationType: "PROJECT_ASSIGNMENT",
+      priority: "HIGH",
+      actionUrl: "/projects"
+    }, client);
 
     await client.query("COMMIT");
     inTransaction = false;
@@ -1698,7 +1985,7 @@ app.get("/projects/progress-dashboard", authenticate, authorize("ADMIN", "MANAGE
   }
 });
 
-app.get("/projects/:id(\\d+)/plan-boq", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.get("/projects/:id(\\d+)/plan-boq", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const { rows } = await pool.query(
@@ -1715,7 +2002,7 @@ app.get("/projects/:id(\\d+)/plan-boq", authenticate, authorize("ADMIN", "MANAGE
   }
 });
 
-app.post("/projects/:id(\\d+)/plan-boq", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.post("/projects/:id(\\d+)/plan-boq", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const {
@@ -1785,7 +2072,7 @@ app.post("/projects/:id(\\d+)/plan-boq", authenticate, authorize("ADMIN", "MANAG
   }
 });
 
-app.put("/projects/:id(\\d+)/plan-boq/:itemId(\\d+)", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.put("/projects/:id(\\d+)/plan-boq/:itemId(\\d+)", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const itemId = Number(req.params.itemId);
@@ -1878,7 +2165,7 @@ app.put("/projects/:id(\\d+)/plan-boq/:itemId(\\d+)", authenticate, authorize("A
   }
 });
 
-app.delete("/projects/:id(\\d+)/plan-boq/:itemId(\\d+)", authenticate, authorize("ADMIN", "MANAGER"), async (req, res) => {
+app.delete("/projects/:id(\\d+)/plan-boq/:itemId(\\d+)", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const itemId = Number(req.params.itemId);
@@ -1987,7 +2274,7 @@ app.get("/projects/schedule/today", authenticate, async (req, res) => {
   }
 });
 
-app.post("/projects/work-schedules/bulk", authenticate, authorize("MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+app.post("/projects/work-schedules/bulk", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   try {
     const {
@@ -2043,15 +2330,15 @@ app.post("/projects/work-schedules/bulk", authenticate, authorize("MANAGER", "AD
         [userId, Number(projectId), normalizedShiftCode, resolvedShiftName, shiftStartTime, shiftEndTime, workDate, normalizedStatus, createdBy]
       );
       inserted.push(result.rows[0]);
-      await client.query(
-        `INSERT INTO notifications (user_id, title, message, notification_type, priority, status, created_at)
-         VALUES ($1, $2, $3, 'SYSTEM', 'NORMAL', 'UNREAD', NOW())`,
-        [
-          userId,
-          "Work schedule updated",
-          `Your schedule for ${workDate} has been updated to project ${Number(projectId)} (${normalizedStatus}).`
-        ]
-      );
+      await createNotification({
+        userId,
+        senderUserId: createdBy,
+        title: "Work schedule updated",
+        message: `Your schedule for ${workDate} has been updated to project ${Number(projectId)} (${normalizedStatus}).`,
+        notificationType: "WORK_SCHEDULE",
+        priority: normalizedStatus === "CANCELLED" ? "HIGH" : "NORMAL",
+        actionUrl: "/schedule"
+      }, client);
     }
     await client.query("COMMIT");
     return res.status(201).json({ insertedCount: inserted.length, rows: inserted });
@@ -2071,7 +2358,7 @@ app.post("/projects/work-schedules/bulk", authenticate, authorize("MANAGER", "AD
   }
 });
 
-app.post("/projects/work-schedules/import", authenticate, authorize("MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
+app.post("/projects/work-schedules/import", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN", "HR_MANAGER"), async (req, res) => {
   const client = await pool.connect();
   try {
     const createdBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
@@ -2117,15 +2404,15 @@ app.post("/projects/work-schedules/import", authenticate, authorize("MANAGER", "
           createdBy
         ]
       );
-      await client.query(
-        `INSERT INTO notifications (user_id, title, message, notification_type, priority, status, created_at)
-         VALUES ($1, $2, $3, 'SYSTEM', 'NORMAL', 'UNREAD', NOW())`,
-        [
-          userId,
-          "Work schedule updated",
-          `Your schedule for ${workDate} has been updated to project ${projectId} (${normalizedStatus}).`
-        ]
-      );
+      await createNotification({
+        userId,
+        senderUserId: createdBy,
+        title: "Work schedule updated",
+        message: `Your schedule for ${workDate} has been updated to project ${projectId} (${normalizedStatus}).`,
+        notificationType: "WORK_SCHEDULE",
+        priority: normalizedStatus === "CANCELLED" ? "HIGH" : "NORMAL",
+        actionUrl: "/schedule"
+      }, client);
       insertedCount += 1;
     }
     await client.query("COMMIT");
@@ -2159,6 +2446,11 @@ app.get("/projects/work-schedules/export", authenticate, authorize("PROJECT_MANA
          ws.user_id AS "userId",
          u.employee_code AS "employeeCode",
          u.full_name AS "fullName",
+         u.phone AS "phone",
+         COALESCE(u.job_title, '') AS "jobTitle",
+         COALESCE(u.trade_code, '') AS "tradeCode",
+         COALESCE(u.skill_level, '') AS "skillLevel",
+         COALESCE(u.specialization, '') AS "specialization",
          ws.project_id AS "projectId",
          p.project_code AS "projectCode",
          ws.work_date AS "workDate",
@@ -2166,7 +2458,8 @@ app.get("/projects/work-schedules/export", authenticate, authorize("PROJECT_MANA
          ws.shift_name AS "shiftName",
          ws.shift_start_time AS "shiftStartTime",
          ws.shift_end_time AS "shiftEndTime",
-         ws.status
+         ws.status,
+         ws.status AS "scheduleStatus"
        FROM employee_work_schedules ws
        JOIN users u ON u.id = ws.user_id
        JOIN projects p ON p.id = ws.project_id
@@ -2221,7 +2514,7 @@ app.post("/projects/workforce-quotas/submit", authenticate, authorize("PROJECT_M
     for (const item of items) {
       const tradeCode = String(item?.tradeCode || "").trim().toUpperCase();
       const requestedCount = Math.max(0, Number(item?.requestedCount || 0));
-      if (!tradeCode) continue;
+      if (!tradeCode || isRemovedTradeCode(tradeCode)) continue;
       const result = await client.query(
         `INSERT INTO workforce_quota_requests
            (project_id, from_date, to_date, shift_code, trade_code, requested_count, status, created_by)
@@ -2235,6 +2528,18 @@ app.post("/projects/workforce-quotas/submit", authenticate, authorize("PROJECT_M
         [projectId, fromDate, toDate, shiftCode, tradeCode, requestedCount, createdBy]
       );
       rows.push(result.rows[0]);
+    }
+    if (rows.length > 0) {
+      const project = await client.query("SELECT project_code, name FROM projects WHERE id = $1", [projectId]);
+      const totalRequested = rows.reduce((sum, row) => sum + Number(row.requested_count || 0), 0);
+      await notifyRoles("HR_MANAGER", {
+        senderUserId: createdBy,
+        title: "Workforce quota submitted",
+        message: `${project.rows[0]?.project_code || "Project"} - ${project.rows[0]?.name || ""} requested ${totalRequested} worker(s) for ${fromDate} to ${toDate} (${shiftCode}).`,
+        notificationType: "WORKFORCE_QUOTA",
+        priority: "HIGH",
+        actionUrl: "/workforce"
+      }, client);
     }
     await client.query("COMMIT");
     return res.status(201).json(rows);
@@ -2287,6 +2592,19 @@ app.get("/projects/workforce-quotas", authenticate, authorize("PROJECT_MANAGER",
     return res.json(rows);
   } catch (error) {
     return res.status(500).json({ message: "Failed to load workforce quota", error: error.message });
+  }
+});
+
+app.delete("/projects/workforce-quotas/:id(\\d+)", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  try {
+    const quotaId = Number(req.params.id);
+    const result = await pool.query("DELETE FROM workforce_quota_requests WHERE id = $1 RETURNING id", [quotaId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Workforce quota not found" });
+    }
+    return res.json({ message: "Workforce quota deleted" });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to delete workforce quota", error: error.message });
   }
 });
 
@@ -2468,6 +2786,162 @@ app.delete("/projects/:id(\\d+)/materials/:itemId(\\d+)", authenticate, authoriz
     return res.json({ message: "Material deleted" });
   } catch (error) {
     return res.status(500).json({ message: "Failed to delete material", error: error.message });
+  }
+});
+
+app.get("/projects/:id(\\d+)/material-usage", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  try {
+    const projectId = Number(req.params.id);
+    const { rows } = await pool.query(
+      `SELECT usage.*,
+              material.material_name,
+              material.unit,
+              material.unit_cost,
+              stage.stage_name,
+              stage.stage_order
+       FROM project_daily_material_usage usage
+       JOIN project_material_logs material ON material.id = usage.material_id
+       LEFT JOIN project_stages stage ON stage.id = usage.stage_id
+       WHERE usage.project_id = $1
+       ORDER BY usage.usage_date DESC, usage.id DESC`,
+      [projectId]
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load daily material usage", error: error.message });
+  }
+});
+
+app.post("/projects/:id(\\d+)/material-usage", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = Number(req.params.id);
+    const { materialId, stageId, usageDate, usedQty, wbsCode, note } = req.body;
+    const normalizedMaterialId = Number(materialId || 0);
+
+    if (!normalizedMaterialId || Number(usedQty || 0) <= 0) {
+      return res.status(400).json({ message: "materialId and usedQty are required" });
+    }
+
+    const material = await client.query("SELECT id FROM project_material_logs WHERE id = $1 AND project_id = $2", [normalizedMaterialId, projectId]);
+    if (material.rowCount === 0) {
+      return res.status(400).json({ message: "materialId must belong to project" });
+    }
+
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `INSERT INTO project_daily_material_usage
+       (project_id, material_id, stage_id, usage_date, used_qty, wbs_code, note, created_by, updated_by)
+       VALUES ($1,$2,$3,COALESCE($4, CURRENT_DATE),$5,$6,$7,$8,$8)
+       RETURNING *`,
+      [
+        projectId,
+        normalizedMaterialId,
+        stageId ? Number(stageId) : null,
+        usageDate || null,
+        Number(usedQty || 0),
+        wbsCode || null,
+        note || null,
+        req.user.sub
+      ]
+    );
+    await recalculateMaterialUsedQuantity(normalizedMaterialId, client);
+    await client.query("COMMIT");
+    return res.status(201).json(rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Failed to create daily material usage", error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/projects/:id(\\d+)/material-usage/:usageId(\\d+)", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = Number(req.params.id);
+    const usageId = Number(req.params.usageId);
+    const { materialId, stageId, usageDate, usedQty, wbsCode, note } = req.body;
+
+    const existing = await client.query(
+      "SELECT material_id FROM project_daily_material_usage WHERE id = $1 AND project_id = $2",
+      [usageId, projectId]
+    );
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ message: "Daily material usage not found" });
+    }
+
+    const normalizedMaterialId = materialId == null ? null : Number(materialId);
+    if (normalizedMaterialId) {
+      const material = await client.query("SELECT id FROM project_material_logs WHERE id = $1 AND project_id = $2", [normalizedMaterialId, projectId]);
+      if (material.rowCount === 0) {
+        return res.status(400).json({ message: "materialId must belong to project" });
+      }
+    }
+
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `UPDATE project_daily_material_usage
+       SET material_id = COALESCE($1, material_id),
+           stage_id = COALESCE($2, stage_id),
+           usage_date = COALESCE($3, usage_date),
+           used_qty = COALESCE($4, used_qty),
+           wbs_code = COALESCE($5, wbs_code),
+           note = COALESCE($6, note),
+           updated_by = $7,
+           updated_at = NOW()
+       WHERE id = $8 AND project_id = $9
+       RETURNING *`,
+      [
+        normalizedMaterialId,
+        stageId == null ? null : Number(stageId),
+        usageDate || null,
+        usedQty == null ? null : Number(usedQty),
+        wbsCode,
+        note,
+        req.user.sub,
+        usageId,
+        projectId
+      ]
+    );
+
+    await recalculateMaterialUsedQuantity(Number(existing.rows[0].material_id), client);
+    if (normalizedMaterialId && normalizedMaterialId !== Number(existing.rows[0].material_id)) {
+      await recalculateMaterialUsedQuantity(normalizedMaterialId, client);
+    }
+    await client.query("COMMIT");
+    return res.json(rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Failed to update daily material usage", error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete("/projects/:id(\\d+)/material-usage/:usageId(\\d+)", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = Number(req.params.id);
+    const usageId = Number(req.params.usageId);
+    const existing = await client.query(
+      "SELECT material_id FROM project_daily_material_usage WHERE id = $1 AND project_id = $2",
+      [usageId, projectId]
+    );
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ message: "Daily material usage not found" });
+    }
+
+    await client.query("BEGIN");
+    await client.query("DELETE FROM project_daily_material_usage WHERE id = $1 AND project_id = $2", [usageId, projectId]);
+    await recalculateMaterialUsedQuantity(Number(existing.rows[0].material_id), client);
+    await client.query("COMMIT");
+    return res.json({ message: "Daily material usage deleted" });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Failed to delete daily material usage", error: error.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -2968,10 +3442,20 @@ app.get("/projects/:id(\\d+)/construction-diary", authenticate, authorize("PROJE
   try {
     const projectId = Number(req.params.id);
     const { rows } = await pool.query(
-      `SELECT *
-       FROM project_construction_diaries
-       WHERE project_id = $1
-       ORDER BY COALESCE(diary_date, created_at) DESC, id DESC`,
+      `SELECT d.*,
+              task.wbs_code AS task_wbs_code,
+              task.item_name AS task_name,
+              CASE
+                WHEN task.id IS NULL THEN NULL
+                ELSE CONCAT(COALESCE(task.wbs_code, CONCAT('Task #', task.id)), ' - ', COALESCE(task.item_name, 'Untitled task'))
+              END AS task_label,
+              task.parent_wbs_code AS task_parent_wbs_code,
+              stage.stage_name AS task_stage_name
+       FROM project_construction_diaries d
+       LEFT JOIN project_plan_boq_items task ON task.id = d.task_id AND task.project_id = d.project_id
+       LEFT JOIN project_stages stage ON stage.id = task.stage_id
+       WHERE d.project_id = $1
+       ORDER BY COALESCE(d.diary_date, d.created_at) DESC, d.id DESC`,
       [projectId]
     );
     return res.json(rows);
@@ -2985,6 +3469,7 @@ app.post("/projects/:id(\\d+)/construction-diary", authenticate, authorize("PROJ
     const projectId = Number(req.params.id);
     const {
       diaryCode,
+      taskId,
       diaryDate,
       title,
       sitePhotoData,
@@ -3009,14 +3494,16 @@ app.post("/projects/:id(\\d+)/construction-diary", authenticate, authorize("PROJ
     } = req.body;
 
     const resolvedTitle = title || diaryCode || "Construction diary";
+    const normalizedTaskId = await normalizeProjectTaskId(projectId, taskId);
 
     const { rows } = await pool.query(
       `INSERT INTO project_construction_diaries
-       (project_id, diary_code, diary_date, title, site_photo_data, work_content, issues, weather, weather_morning, weather_afternoon, weather_evening, weather_night, site_condition, temperature, incident_report, safety_rating, quality_rating, progress_rating, hygiene_rating, proposal, report_watchers, note, status, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$24)
+       (project_id, task_id, diary_code, diary_date, title, site_photo_data, work_content, issues, weather, weather_morning, weather_afternoon, weather_evening, weather_night, site_condition, temperature, incident_report, safety_rating, quality_rating, progress_rating, hygiene_rating, proposal, report_watchers, note, status, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)
        RETURNING *`,
       [
         projectId,
+        normalizedTaskId,
         diaryCode || null,
         diaryDate || null,
         resolvedTitle,
@@ -3054,6 +3541,7 @@ app.put("/projects/:id(\\d+)/construction-diary/:diaryId(\\d+)", authenticate, a
     const diaryId = Number(req.params.diaryId);
     const {
       diaryCode,
+      taskId,
       diaryDate,
       title,
       sitePhotoData,
@@ -3077,35 +3565,38 @@ app.put("/projects/:id(\\d+)/construction-diary/:diaryId(\\d+)", authenticate, a
       status
     } = req.body;
 
+    const normalizedTaskId = taskId === undefined ? undefined : await normalizeProjectTaskId(projectId, taskId);
     const { rows } = await pool.query(
       `UPDATE project_construction_diaries
-       SET diary_code = COALESCE($1, diary_code),
-           diary_date = COALESCE($2, diary_date),
-           title = COALESCE($3, title),
-           site_photo_data = COALESCE($4, site_photo_data),
-           work_content = COALESCE($5, work_content),
-           issues = COALESCE($6, issues),
-           weather = COALESCE($7, weather),
-           weather_morning = COALESCE($8, weather_morning),
-           weather_afternoon = COALESCE($9, weather_afternoon),
-           weather_evening = COALESCE($10, weather_evening),
-           weather_night = COALESCE($11, weather_night),
-           site_condition = COALESCE($12, site_condition),
-           temperature = COALESCE($13, temperature),
-           incident_report = COALESCE($14, incident_report),
-           safety_rating = COALESCE($15, safety_rating),
-           quality_rating = COALESCE($16, quality_rating),
-           progress_rating = COALESCE($17, progress_rating),
-           hygiene_rating = COALESCE($18, hygiene_rating),
-           proposal = COALESCE($19, proposal),
-           report_watchers = COALESCE($20, report_watchers),
-           note = COALESCE($21, note),
-           status = COALESCE($22, status),
-           updated_by = $23,
+       SET task_id = COALESCE($1, task_id),
+           diary_code = COALESCE($2, diary_code),
+           diary_date = COALESCE($3, diary_date),
+           title = COALESCE($4, title),
+           site_photo_data = COALESCE($5, site_photo_data),
+           work_content = COALESCE($6, work_content),
+           issues = COALESCE($7, issues),
+           weather = COALESCE($8, weather),
+           weather_morning = COALESCE($9, weather_morning),
+           weather_afternoon = COALESCE($10, weather_afternoon),
+           weather_evening = COALESCE($11, weather_evening),
+           weather_night = COALESCE($12, weather_night),
+           site_condition = COALESCE($13, site_condition),
+           temperature = COALESCE($14, temperature),
+           incident_report = COALESCE($15, incident_report),
+           safety_rating = COALESCE($16, safety_rating),
+           quality_rating = COALESCE($17, quality_rating),
+           progress_rating = COALESCE($18, progress_rating),
+           hygiene_rating = COALESCE($19, hygiene_rating),
+           proposal = COALESCE($20, proposal),
+           report_watchers = COALESCE($21, report_watchers),
+           note = COALESCE($22, note),
+           status = COALESCE($23, status),
+           updated_by = $24,
            updated_at = NOW()
-       WHERE id = $24 AND project_id = $25
+       WHERE id = $25 AND project_id = $26
        RETURNING *`,
       [
+        normalizedTaskId,
         diaryCode,
         diaryDate,
         title,
@@ -3161,10 +3652,20 @@ app.get("/projects/:id(\\d+)/rfx", authenticate, authorize("PROJECT_MANAGER", "M
   try {
     const projectId = Number(req.params.id);
     const { rows } = await pool.query(
-      `SELECT *
-       FROM project_rfx_records
-       WHERE project_id = $1
-       ORDER BY COALESCE(due_date, created_at) DESC, id DESC`,
+      `SELECT r.*,
+              task.wbs_code AS task_wbs_code,
+              task.item_name AS task_name,
+              CASE
+                WHEN task.id IS NULL THEN NULL
+                ELSE CONCAT(COALESCE(task.wbs_code, CONCAT('Task #', task.id)), ' - ', COALESCE(task.item_name, 'Untitled task'))
+              END AS task_label,
+              task.parent_wbs_code AS task_parent_wbs_code,
+              stage.stage_name AS task_stage_name
+       FROM project_rfx_records r
+       LEFT JOIN project_plan_boq_items task ON task.id = r.task_id AND task.project_id = r.project_id
+       LEFT JOIN project_stages stage ON stage.id = task.stage_id
+       WHERE r.project_id = $1
+       ORDER BY COALESCE(r.due_date, r.created_at) DESC, r.id DESC`,
       [projectId]
     );
     return res.json(rows);
@@ -3176,18 +3677,20 @@ app.get("/projects/:id(\\d+)/rfx", authenticate, authorize("PROJECT_MANAGER", "M
 app.post("/projects/:id(\\d+)/rfx", authenticate, authorize("PROJECT_MANAGER", "MANAGER", "ADMIN"), async (req, res) => {
   try {
     const projectId = Number(req.params.id);
-    const { rfxType, title, priority, status, requestedBy, dueDate, resolvedOn, description } = req.body;
+    const { taskId, rfxType, title, priority, status, requestedBy, dueDate, resolvedOn, description } = req.body;
     if (!title) {
       return res.status(400).json({ message: "title is required" });
     }
+    const normalizedTaskId = await normalizeProjectTaskId(projectId, taskId);
 
     const { rows } = await pool.query(
       `INSERT INTO project_rfx_records
-       (project_id, rfx_type, title, priority, status, requested_by, due_date, resolved_on, description, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+       (project_id, task_id, rfx_type, title, priority, status, requested_by, due_date, resolved_on, description, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
        RETURNING *`,
       [
         projectId,
+        normalizedTaskId,
         String(rfxType || "RFI").toUpperCase(),
         title,
         String(priority || "NORMAL").toUpperCase(),
@@ -3209,22 +3712,25 @@ app.put("/projects/:id(\\d+)/rfx/:rfxId(\\d+)", authenticate, authorize("PROJECT
   try {
     const projectId = Number(req.params.id);
     const rfxId = Number(req.params.rfxId);
-    const { rfxType, title, priority, status, requestedBy, dueDate, resolvedOn, description } = req.body;
+    const { taskId, rfxType, title, priority, status, requestedBy, dueDate, resolvedOn, description } = req.body;
+    const normalizedTaskId = taskId === undefined ? undefined : await normalizeProjectTaskId(projectId, taskId);
     const { rows } = await pool.query(
       `UPDATE project_rfx_records
-       SET rfx_type = COALESCE($1, rfx_type),
-           title = COALESCE($2, title),
-           priority = COALESCE($3, priority),
-           status = COALESCE($4, status),
-           requested_by = COALESCE($5, requested_by),
-           due_date = COALESCE($6, due_date),
-           resolved_on = COALESCE($7, resolved_on),
-           description = COALESCE($8, description),
-           updated_by = $9,
+       SET task_id = COALESCE($1, task_id),
+           rfx_type = COALESCE($2, rfx_type),
+           title = COALESCE($3, title),
+           priority = COALESCE($4, priority),
+           status = COALESCE($5, status),
+           requested_by = COALESCE($6, requested_by),
+           due_date = COALESCE($7, due_date),
+           resolved_on = COALESCE($8, resolved_on),
+           description = COALESCE($9, description),
+           updated_by = $10,
            updated_at = NOW()
-       WHERE id = $10 AND project_id = $11
+       WHERE id = $11 AND project_id = $12
        RETURNING *`,
       [
+        normalizedTaskId,
         rfxType ? String(rfxType).toUpperCase() : null,
         title,
         priority ? String(priority).toUpperCase() : null,

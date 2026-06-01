@@ -1464,7 +1464,7 @@ function WorkforceAssignmentPage({ token }) {
   );
 }
 
-export default function AdminWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
+export default function AdminWorkspace({ token, profile, notificationControl, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal }) {
   const menuItems = useMemo(
     () => [
       { key: "attendance", label: "Attendance Management" },
@@ -1480,10 +1480,37 @@ export default function AdminWorkspace({ token, profile, onOpenProfileModal, onO
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   return (
-    <section className="grid gap-6 lg:grid-cols-[320px_1fr] h-full">
-      <aside className="lg:sticky lg:top-0 lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
+    <section className="h-full overflow-auto p-3 lg:grid lg:grid-cols-[320px_1fr] lg:gap-6 lg:p-0">
+      <div className="sticky top-0 z-[650] mb-3 rounded-2xl border border-white/50 bg-white/90 p-3 shadow-lg backdrop-blur-md lg:hidden">
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-steel">HR Administration</h2>
+            <p className="text-xs text-graphite/60">Hello, {profile?.fullName || "Administrator"}</p>
+          </div>
+          {notificationControl}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <select className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm font-semibold text-steel" value={activePage} onChange={(event) => setActivePage(event.target.value)}>
+            {menuItems.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+          </select>
+          <div className="relative">
+            <button type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)} className="w-full rounded-xl bg-gradient-to-r from-steel to-emerald-600 px-3 py-2 text-sm font-semibold text-white sm:w-auto">Account</button>
+            {accountMenuOpen && (
+              <div className="absolute right-0 top-full z-[750] mt-2 w-48 rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button type="button" onClick={() => { onOpenProfileModal(); setAccountMenuOpen(false); }} className="w-full rounded-t-lg px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Edit Profile</button>
+                <button type="button" onClick={() => { onOpenPasswordModal(); setAccountMenuOpen(false); }} className="w-full px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Change Password</button>
+                <button type="button" onClick={() => { onOpenLogoutModal(); setAccountMenuOpen(false); }} className="w-full rounded-b-lg px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50">Sign Out</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <aside className="hidden lg:sticky lg:top-0 lg:block lg:h-screen rounded-none bg-gradient-to-b from-white/80 to-white/60 backdrop-blur-md border-r border-white/40 shadow-lg p-6 overflow-y-auto">
         <div className="mb-6 pb-4 border-b border-steel/10">
-          <h2 className="text-xl font-bold text-steel mb-2">HR Administration</h2>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <h2 className="text-xl font-bold text-steel">HR Administration</h2>
+            {notificationControl}
+          </div>
           <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "Administrator"}</p>
           <div className="mt-3 relative">
             <button
@@ -1549,7 +1576,7 @@ export default function AdminWorkspace({ token, profile, onOpenProfileModal, onO
           })}
         </nav>
       </aside>
-      <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
+      <div className="min-w-0 rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-3 overflow-auto lg:p-6">
         {activePage === "personnel" && <PersonnelPage token={token} />}
         {activePage === "workforce" && <WorkforceAssignmentPage token={token} />}
         {activePage === "attendance" && <AttendanceManagementPage token={token} />}

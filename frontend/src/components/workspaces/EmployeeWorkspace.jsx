@@ -330,7 +330,7 @@ function SalaryPage({ token }) {
   );
 }
 
-export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal, onOpenFaceEnrollModal, faceEnrollmentStatus }) {
+export default function EmployeeWorkspace({ token, profile, notificationControl, onOpenProfileModal, onOpenPasswordModal, onOpenLogoutModal, onOpenFaceEnrollModal, faceEnrollmentStatus }) {
   const menuItems = useMemo(
     () => [
       { key: "attendance", label: "Face + GPS Attendance" },
@@ -367,10 +367,37 @@ export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, 
   }, [token]);
 
   return (
-    <section className="grid gap-6 lg:grid-cols-[280px_1fr] h-full p-6">
-      <div className="rounded-2xl bg-white/80 backdrop-blur-md border border-white/40 shadow-lg p-4">
+    <section className="h-full overflow-auto p-3 lg:grid lg:grid-cols-[280px_1fr] lg:gap-6 lg:p-6">
+      <div className="sticky top-0 z-[650] mb-3 rounded-2xl border border-white/50 bg-white/90 p-3 shadow-lg backdrop-blur-md lg:hidden">
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-steel">Employee Workspace</h2>
+            <p className="text-xs text-graphite/60">Hello, {profile?.fullName || "Employee"}</p>
+          </div>
+          {notificationControl}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <select className="w-full rounded-xl border border-steel/20 bg-white px-3 py-2 text-sm font-semibold text-steel" value={activePage} onChange={(event) => setActivePage(event.target.value)}>
+            {menuItems.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+          </select>
+          <div className="relative">
+            <button type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)} className="w-full rounded-xl bg-gradient-to-r from-steel to-emerald-600 px-3 py-2 text-sm font-semibold text-white sm:w-auto">Account</button>
+            {accountMenuOpen && (
+              <div className="absolute right-0 top-full z-[750] mt-2 w-48 rounded-xl border border-steel/15 bg-white shadow-xl">
+                <button type="button" onClick={() => { onOpenProfileModal(); setAccountMenuOpen(false); }} className="w-full rounded-t-lg px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Edit Profile</button>
+                <button type="button" onClick={() => { onOpenPasswordModal(); setAccountMenuOpen(false); }} className="w-full px-3 py-2 text-left text-sm text-graphite hover:bg-steel/10">Change Password</button>
+                <button type="button" onClick={() => { onOpenLogoutModal(); setAccountMenuOpen(false); }} className="w-full rounded-b-lg px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50">Sign Out</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="hidden rounded-2xl bg-white/80 backdrop-blur-md border border-white/40 shadow-lg p-4 lg:block">
         <div className="mb-6 pb-4 border-b border-steel/10">
-          <h2 className="text-xl font-bold text-steel mb-2">Employee Workspace</h2>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <h2 className="text-xl font-bold text-steel">Employee Workspace</h2>
+            {notificationControl}
+          </div>
           <p className="text-sm text-graphite/60">Hello, {profile?.fullName || "Employee"}</p>
           <div className="mt-3 relative">
             <button
@@ -433,7 +460,7 @@ export default function EmployeeWorkspace({ token, profile, onOpenProfileModal, 
           ))}
         </nav>
       </div>
-      <div className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-6 overflow-auto">
+      <div className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow-lg p-3 overflow-auto lg:p-6">
         {todayProject && (activePage === "attendance" || activePage === "schedule") && (
           <div className="mb-4 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-cyan-900">
             <p className="text-xs font-semibold uppercase tracking-wide">Today Work Location</p>

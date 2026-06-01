@@ -6,15 +6,21 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
 const app = express();
-const port = Number(process.env.REQUEST_SERVICE_PORT || 3006);
+const port = Number(process.env.PORT || process.env.REQUEST_SERVICE_PORT || 3006);
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
@@ -35,6 +41,50 @@ function canReviewRequest(userRole, requestType) {
   if (requestType === "LEAVE") return userRole === "HR_MANAGER";
   if (["MISSED_PUNCH", "OT"].includes(requestType)) return userRole === "PROJECT_MANAGER";
   return false;
+}
+
+function reviewerRolesForRequest(requestType) {
+  const normalized = String(requestType || "").toUpperCase();
+  if (normalized === "LEAVE") return ["HR_MANAGER"];
+  if (["MISSED_PUNCH", "OT"].includes(normalized)) return ["PROJECT_MANAGER"];
+  return ["HR_MANAGER", "PROJECT_MANAGER"];
+}
+
+async function createNotification({ userId, senderUserId, title, message, notificationType = "SYSTEM", priority = "NORMAL", actionUrl = null }, db = pool) {
+  if (!userId || !title || !message) return;
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sender_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMP");
+  await db.query(
+    `INSERT INTO notifications (user_id, sender_user_id, notification_type, priority, title, message, action_url, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'UNREAD')`,
+    [
+      Number(userId),
+      senderUserId || null,
+      String(notificationType).slice(0, 40).toUpperCase(),
+      String(priority).slice(0, 20).toUpperCase(),
+      title,
+      message,
+      actionUrl
+    ]
+  );
+}
+
+async function notifyRoles(roles, notification, db = pool) {
+  const normalizedRoles = (Array.isArray(roles) ? roles : [roles]).map((role) => String(role || "").toUpperCase()).filter(Boolean);
+  if (normalizedRoles.length === 0) return;
+  const { rows } = await db.query(
+    `SELECT DISTINCT u.id
+     FROM users u
+     JOIN accounts a ON a.user_id = u.id
+     WHERE a.role = ANY($1::text[])
+       AND a.account_status = 'ACTIVE'
+       AND COALESCE(u.status, 'WORKING') = 'WORKING'`,
+    [normalizedRoles]
+  );
+  for (const row of rows) {
+    await createNotification({ ...notification, userId: row.id }, db);
+  }
 }
 
 function authenticate(req, res, next) {
@@ -308,19 +358,29 @@ app.post("/requests", authenticate, async (req, res) => {
       }
     }
 
-    const { rows } = await pool.query(
-      `WITH inserted AS (
-         INSERT INTO requests (user_id, project_id, type, start_date, end_date, request_date, request_shift, hours, reason, attachment_url, request_meta)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-         RETURNING *
-       )
-       UPDATE requests r
-       SET request_code = CONCAT('REQ-', TO_CHAR(NOW(), 'YYYYMMDD'), '-', LPAD(inserted.id::text, 6, '0'))
-       FROM inserted
-       WHERE r.id = inserted.id
-       RETURNING r.*`,
+    const inserted = await pool.query(
+      `INSERT INTO requests (user_id, project_id, type, start_date, end_date, request_date, request_shift, hours, reason, attachment_url, request_meta)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+       RETURNING *`,
       [req.user.sub, projectId, normalizedType, start_date || null, end_date || null, request_date || null, request_shift || null, hours || null, reason, attachment_url || null, JSON.stringify(request_meta || {})]
     );
+    const { rows } = await pool.query(
+      `UPDATE requests
+       SET request_code = CONCAT('REQ-', TO_CHAR(created_at, 'YYYYMMDD'), '-', LPAD(id::text, 6, '0')),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [inserted.rows[0].id]
+    );
+
+    await notifyRoles(reviewerRolesForRequest(normalizedType), {
+      senderUserId: req.user.sub,
+      title: "New request pending review",
+      message: `${rows[0].request_code || `Request #${rows[0].id}`} (${normalizedType}) is waiting for your review.`,
+      notificationType: "REQUEST",
+      priority: normalizedType === "MISSED_PUNCH" ? "HIGH" : "NORMAL",
+      actionUrl: "/requests"
+    });
 
     res.status(201).json(rows[0]);
   } catch (error) {
@@ -370,6 +430,16 @@ app.put("/requests/:id/status", authenticate, async (req, res) => {
     if (status === "APPROVED" && requestType === "OT") {
       await applyOtApproval(requestRow);
     }
+
+    await createNotification({
+      userId: requestRow.user_id,
+      senderUserId: req.user.sub,
+      title: `Request ${status.toLowerCase()}`,
+      message: `${requestRow.request_code || `Request #${requestRow.id}`} (${requestType}) was ${status.toLowerCase()}${reviewer_note ? `: ${reviewer_note}` : "."}`,
+      notificationType: "REQUEST",
+      priority: status === "REJECTED" ? "HIGH" : "NORMAL",
+      actionUrl: "/requests/my"
+    });
 
     res.json(rows[0]);
   } catch (error) {

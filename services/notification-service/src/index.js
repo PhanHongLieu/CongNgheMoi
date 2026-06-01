@@ -6,15 +6,21 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
 const app = express();
-const port = Number(process.env.NOTIFICATION_SERVICE_PORT || 3005);
+const port = Number(process.env.PORT || process.env.NOTIFICATION_SERVICE_PORT || 3005);
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";

@@ -465,6 +465,14 @@ CREATE TABLE IF NOT EXISTS data_logs (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS system_settings (
+  setting_key VARCHAR(120) PRIMARY KEY,
+  setting_value JSONB NOT NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS salaries (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -577,6 +585,24 @@ CREATE TABLE IF NOT EXISTS project_material_logs (
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS project_daily_material_usage (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  material_id INTEGER NOT NULL REFERENCES project_material_logs(id) ON DELETE CASCADE,
+  stage_id INTEGER,
+  usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  used_qty NUMERIC(14,2) NOT NULL DEFAULT 0,
+  wbs_code VARCHAR(80),
+  note TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_daily_material_usage_project_date ON project_daily_material_usage(project_id, usage_date);
+CREATE INDEX IF NOT EXISTS idx_project_daily_material_usage_material ON project_daily_material_usage(material_id);
 
 CREATE TABLE IF NOT EXISTS project_resource_allocations (
   id SERIAL PRIMARY KEY,
@@ -800,6 +826,144 @@ BEGIN
   END IF;
 END $$;
 
+-- Seed professional construction workforce by trade for allocation planning.
+INSERT INTO job_titles (code, name, category)
+VALUES
+  ('FORMWORK_TECH', 'Formwork Technician', 'Construction Workforce'),
+  ('FINISHING_TECH', 'Finishing Technician', 'Construction Workforce'),
+  ('ELECTRICIAN', 'Electrical Technician', 'Construction Workforce'),
+  ('PLUMBER', 'Plumbing Technician', 'Construction Workforce'),
+  ('SITE_ENGINEER', 'Site Engineer', 'Construction Workforce'),
+  ('EQUIPMENT_OPERATOR', 'Equipment Operator', 'Construction Workforce')
+ON CONFLICT (code) DO UPDATE
+SET
+  name = EXCLUDED.name,
+  category = EXCLUDED.category,
+  is_active = TRUE,
+  updated_at = NOW();
+
+WITH seed_workers AS (
+  SELECT *
+  FROM (VALUES
+    ('Minh', 'Nguyen Van', 'Nguyen Van Minh', '0912100101', 'formwork01@mdp.local', 'Male', DATE '1991-02-14', 'Di An, Binh Duong', 'Formwork Technician', 'SENIOR', 'FORMWORK', 'Column and beam formwork', 'FORMWORK_TECH', 6200000::numeric, 42000::numeric),
+    ('Khoa', 'Tran Dinh', 'Tran Dinh Khoa', '0912100102', 'formwork02@mdp.local', 'Male', DATE '1993-06-19', 'Thuan An, Binh Duong', 'Formwork Technician', 'MID', 'FORMWORK', 'Slab formwork installation', 'FORMWORK_TECH', 5800000::numeric, 39000::numeric),
+    ('Tuan', 'Le Quoc', 'Le Quoc Tuan', '0912100103', 'formwork03@mdp.local', 'Male', DATE '1995-09-07', 'Tan Uyen, Binh Duong', 'Formwork Technician', 'MID', 'FORMWORK', 'Scaffold and shuttering support', 'FORMWORK_TECH', 5600000::numeric, 38000::numeric),
+    ('Phuc', 'Pham Huu', 'Pham Huu Phuc', '0912100104', 'formwork04@mdp.local', 'Male', DATE '1997-11-22', 'Thu Dau Mot, Binh Duong', 'Formwork Technician', 'JUNIOR', 'FORMWORK', 'Formwork material handling', 'FORMWORK_TECH', 5200000::numeric, 36000::numeric),
+    ('Long', 'Vo Thanh', 'Vo Thanh Long', '0912100105', 'formwork05@mdp.local', 'Male', DATE '1990-04-03', 'Ben Cat, Binh Duong', 'Formwork Technician', 'LEAD', 'FORMWORK', 'Formwork team coordination', 'FORMWORK_TECH', 7000000::numeric, 47000::numeric),
+    ('Hai', 'Nguyen Duc', 'Nguyen Duc Hai', '0912100201', 'finishing01@mdp.local', 'Male', DATE '1992-01-16', 'Di An, Binh Duong', 'Finishing Technician', 'SENIOR', 'FINISHING', 'Wall plaster and skim coat', 'FINISHING_TECH', 6100000::numeric, 41000::numeric),
+    ('Son', 'Tran Van', 'Tran Van Son', '0912100202', 'finishing02@mdp.local', 'Male', DATE '1994-05-27', 'Thuan An, Binh Duong', 'Finishing Technician', 'MID', 'FINISHING', 'Tile and flooring works', 'FINISHING_TECH', 5700000::numeric, 39000::numeric),
+    ('Nam', 'Le Hoang', 'Le Hoang Nam', '0912100203', 'finishing03@mdp.local', 'Male', DATE '1996-08-08', 'Tan Uyen, Binh Duong', 'Finishing Technician', 'MID', 'FINISHING', 'Painting preparation', 'FINISHING_TECH', 5500000::numeric, 37000::numeric),
+    ('Quang', 'Pham Minh', 'Pham Minh Quang', '0912100204', 'finishing04@mdp.local', 'Male', DATE '1998-12-12', 'Thu Dau Mot, Binh Duong', 'Finishing Technician', 'JUNIOR', 'FINISHING', 'Interior finishing support', 'FINISHING_TECH', 5100000::numeric, 35000::numeric),
+    ('Dat', 'Hoang Gia', 'Hoang Gia Dat', '0912100205', 'finishing05@mdp.local', 'Male', DATE '1989-03-30', 'Ben Cat, Binh Duong', 'Finishing Technician', 'LEAD', 'FINISHING', 'Finishing quality coordination', 'FINISHING_TECH', 6900000::numeric, 46000::numeric),
+    ('Dien', 'Pham Van', 'Pham Van Dien', '0912100301', 'electrical01@mdp.local', 'Male', DATE '1991-07-21', 'Di An, Binh Duong', 'Electrical Technician', 'SENIOR', 'ELECTRICAL', 'Power distribution wiring', 'ELECTRICIAN', 6400000::numeric, 43000::numeric),
+    ('Hieu', 'Tran Quang', 'Tran Quang Hieu', '0912100302', 'electrical02@mdp.local', 'Male', DATE '1993-10-02', 'Thuan An, Binh Duong', 'Electrical Technician', 'MID', 'ELECTRICAL', 'Lighting system installation', 'ELECTRICIAN', 5900000::numeric, 40000::numeric),
+    ('Loc', 'Le Thanh', 'Le Thanh Loc', '0912100303', 'electrical03@mdp.local', 'Male', DATE '1995-04-18', 'Tan Uyen, Binh Duong', 'Electrical Technician', 'MID', 'ELECTRICAL', 'Cable tray and conduit works', 'ELECTRICIAN', 5700000::numeric, 39000::numeric),
+    ('Phong', 'Pham Anh', 'Pham Anh Phong', '0912100304', 'electrical04@mdp.local', 'Male', DATE '1997-09-09', 'Thu Dau Mot, Binh Duong', 'Electrical Technician', 'JUNIOR', 'ELECTRICAL', 'Electrical installation support', 'ELECTRICIAN', 5300000::numeric, 36000::numeric),
+    ('Thang', 'Do Viet', 'Do Viet Thang', '0912100305', 'electrical05@mdp.local', 'Male', DATE '1988-12-25', 'Ben Cat, Binh Duong', 'Electrical Technician', 'LEAD', 'ELECTRICAL', 'Electrical inspection coordination', 'ELECTRICIAN', 7200000::numeric, 48000::numeric),
+    ('Binh', 'Do Van', 'Do Van Binh', '0912100401', 'plumbing01@mdp.local', 'Male', DATE '1992-02-09', 'Di An, Binh Duong', 'Plumbing Technician', 'SENIOR', 'PLUMBING', 'Water supply piping', 'PLUMBER', 6200000::numeric, 42000::numeric),
+    ('Cuong', 'Nguyen Huu', 'Nguyen Huu Cuong', '0912100402', 'plumbing02@mdp.local', 'Male', DATE '1994-06-06', 'Thuan An, Binh Duong', 'Plumbing Technician', 'MID', 'PLUMBING', 'Drainage pipe installation', 'PLUMBER', 5800000::numeric, 39000::numeric),
+    ('Luan', 'Tran Bao', 'Tran Bao Luan', '0912100403', 'plumbing03@mdp.local', 'Male', DATE '1996-10-17', 'Tan Uyen, Binh Duong', 'Plumbing Technician', 'MID', 'PLUMBING', 'Sanitary fixture installation', 'PLUMBER', 5600000::numeric, 38000::numeric),
+    ('Tai', 'Le Minh', 'Le Minh Tai', '0912100404', 'plumbing04@mdp.local', 'Male', DATE '1998-01-29', 'Thu Dau Mot, Binh Duong', 'Plumbing Technician', 'JUNIOR', 'PLUMBING', 'Pipe material preparation', 'PLUMBER', 5200000::numeric, 36000::numeric),
+    ('Vinh', 'Vo Quoc', 'Vo Quoc Vinh', '0912100405', 'plumbing05@mdp.local', 'Male', DATE '1989-05-15', 'Ben Cat, Binh Duong', 'Plumbing Technician', 'LEAD', 'PLUMBING', 'Plumbing pressure test coordination', 'PLUMBER', 7000000::numeric, 47000::numeric),
+    ('An', 'Bui Van', 'Bui Van An', '0912100501', 'engineering01@mdp.local', 'Male', DATE '1990-03-11', 'Di An, Binh Duong', 'Site Engineer', 'SENIOR', 'ENGINEERING', 'Site execution planning', 'SITE_ENGINEER', 9000000::numeric, 60000::numeric),
+    ('Huy', 'Nguyen Manh', 'Nguyen Manh Huy', '0912100502', 'engineering02@mdp.local', 'Male', DATE '1992-07-04', 'Thuan An, Binh Duong', 'Site Engineer', 'MID', 'ENGINEERING', 'Daily progress coordination', 'SITE_ENGINEER', 8200000::numeric, 55000::numeric),
+    ('Kien', 'Tran Trung', 'Tran Trung Kien', '0912100503', 'engineering03@mdp.local', 'Male', DATE '1994-11-23', 'Tan Uyen, Binh Duong', 'Site Engineer', 'MID', 'ENGINEERING', 'Quantity and WBS tracking', 'SITE_ENGINEER', 7800000::numeric, 52000::numeric),
+    ('Lam', 'Le Gia', 'Le Gia Lam', '0912100504', 'engineering04@mdp.local', 'Male', DATE '1996-02-28', 'Thu Dau Mot, Binh Duong', 'Site Engineer', 'JUNIOR', 'ENGINEERING', 'Drawing and site document control', 'SITE_ENGINEER', 7000000::numeric, 47000::numeric),
+    ('Nghia', 'Pham Trong', 'Pham Trong Nghia', '0912100505', 'engineering05@mdp.local', 'Male', DATE '1988-08-20', 'Ben Cat, Binh Duong', 'Site Engineer', 'LEAD', 'ENGINEERING', 'Construction method coordination', 'SITE_ENGINEER', 10500000::numeric, 70000::numeric),
+    ('May', 'Hoang Van', 'Hoang Van May', '0912100601', 'equipment01@mdp.local', 'Male', DATE '1991-01-05', 'Di An, Binh Duong', 'Equipment Operator', 'SENIOR', 'EQUIPMENT', 'Excavator operation', 'EQUIPMENT_OPERATOR', 7200000::numeric, 48000::numeric),
+    ('Khanh', 'Nguyen Phu', 'Nguyen Phu Khanh', '0912100602', 'equipment02@mdp.local', 'Male', DATE '1993-05-13', 'Thuan An, Binh Duong', 'Equipment Operator', 'MID', 'EQUIPMENT', 'Forklift operation', 'EQUIPMENT_OPERATOR', 6600000::numeric, 44000::numeric),
+    ('Manh', 'Tran Duc', 'Tran Duc Manh', '0912100603', 'equipment03@mdp.local', 'Male', DATE '1995-09-26', 'Tan Uyen, Binh Duong', 'Equipment Operator', 'MID', 'EQUIPMENT', 'Compactor operation', 'EQUIPMENT_OPERATOR', 6400000::numeric, 43000::numeric),
+    ('Nhan', 'Le Hoai', 'Le Hoai Nhan', '0912100604', 'equipment04@mdp.local', 'Male', DATE '1997-12-01', 'Thu Dau Mot, Binh Duong', 'Equipment Operator', 'JUNIOR', 'EQUIPMENT', 'Equipment assistant operation', 'EQUIPMENT_OPERATOR', 5800000::numeric, 39000::numeric),
+    ('Tri', 'Vo Minh', 'Vo Minh Tri', '0912100605', 'equipment05@mdp.local', 'Male', DATE '1989-04-24', 'Ben Cat, Binh Duong', 'Equipment Operator', 'LEAD', 'EQUIPMENT', 'Heavy equipment coordination', 'EQUIPMENT_OPERATOR', 8000000::numeric, 53000::numeric)
+  ) AS seed(first_name, last_name, full_name, phone, email, gender, birth_date, address, job_title, skill_level, trade_code, specialization, job_title_code, base_monthly_salary, hourly_rate)
+)
+INSERT INTO users (
+  first_name,
+  last_name,
+  full_name,
+  phone,
+  email,
+  gender,
+  birth_date,
+  address,
+  status,
+  job_title,
+  skill_level,
+  trade_code,
+  specialization,
+  job_title_id,
+  base_monthly_salary,
+  hourly_rate,
+  face_enrollment_status
+)
+SELECT
+  sw.first_name,
+  sw.last_name,
+  sw.full_name,
+  sw.phone,
+  sw.email,
+  sw.gender,
+  sw.birth_date,
+  sw.address,
+  'WORKING',
+  sw.job_title,
+  sw.skill_level,
+  sw.trade_code,
+  sw.specialization,
+  jt.id,
+  sw.base_monthly_salary,
+  sw.hourly_rate,
+  'UNREGISTERED'
+FROM seed_workers sw
+LEFT JOIN job_titles jt ON jt.code = sw.job_title_code
+ON CONFLICT (email) DO UPDATE
+SET
+  first_name = EXCLUDED.first_name,
+  last_name = EXCLUDED.last_name,
+  full_name = EXCLUDED.full_name,
+  phone = EXCLUDED.phone,
+  gender = EXCLUDED.gender,
+  birth_date = EXCLUDED.birth_date,
+  address = EXCLUDED.address,
+  status = EXCLUDED.status,
+  job_title = EXCLUDED.job_title,
+  skill_level = EXCLUDED.skill_level,
+  trade_code = EXCLUDED.trade_code,
+  specialization = EXCLUDED.specialization,
+  job_title_id = EXCLUDED.job_title_id,
+  base_monthly_salary = EXCLUDED.base_monthly_salary,
+  hourly_rate = EXCLUDED.hourly_rate,
+  updated_at = NOW();
+
+WITH seed_worker_accounts AS (
+  SELECT email
+  FROM (VALUES
+    ('formwork01@mdp.local'), ('formwork02@mdp.local'), ('formwork03@mdp.local'), ('formwork04@mdp.local'), ('formwork05@mdp.local'),
+    ('finishing01@mdp.local'), ('finishing02@mdp.local'), ('finishing03@mdp.local'), ('finishing04@mdp.local'), ('finishing05@mdp.local'),
+    ('electrical01@mdp.local'), ('electrical02@mdp.local'), ('electrical03@mdp.local'), ('electrical04@mdp.local'), ('electrical05@mdp.local'),
+    ('plumbing01@mdp.local'), ('plumbing02@mdp.local'), ('plumbing03@mdp.local'), ('plumbing04@mdp.local'), ('plumbing05@mdp.local'),
+    ('engineering01@mdp.local'), ('engineering02@mdp.local'), ('engineering03@mdp.local'), ('engineering04@mdp.local'), ('engineering05@mdp.local'),
+    ('equipment01@mdp.local'), ('equipment02@mdp.local'), ('equipment03@mdp.local'), ('equipment04@mdp.local'), ('equipment05@mdp.local')
+  ) AS seed(email)
+)
+INSERT INTO accounts (user_id, role, password_hash, account_status, password_changed_at)
+SELECT
+  u.id,
+  'EMPLOYEE',
+  '$2a$10$vJpGJ7NOmQfyn/VaOxfWuesoCuXX6DxG4T01gJoWJ6I7dYkTdW2US',
+  'ACTIVE',
+  NOW()
+FROM users u
+JOIN seed_worker_accounts seed ON seed.email = u.email
+ON CONFLICT (user_id) DO UPDATE
+SET
+  role = 'EMPLOYEE',
+  account_status = 'ACTIVE',
+  password_changed_at = COALESCE(accounts.password_changed_at, NOW()),
+  updated_at = NOW();
+
+-- End construction workforce seed.
+
 INSERT INTO projects (
   project_code,
   name,
@@ -1002,6 +1166,7 @@ CREATE TABLE IF NOT EXISTS project_equipment_logs (
 CREATE TABLE IF NOT EXISTS project_construction_diaries (
   id SERIAL PRIMARY KEY,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL,
   diary_code VARCHAR(80),
   diary_date DATE NOT NULL DEFAULT CURRENT_DATE,
   title VARCHAR(255) NOT NULL,
@@ -1033,6 +1198,7 @@ CREATE TABLE IF NOT EXISTS project_construction_diaries (
 CREATE TABLE IF NOT EXISTS project_rfx_records (
   id SERIAL PRIMARY KEY,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL,
   rfx_type VARCHAR(20) NOT NULL DEFAULT 'RFI' CHECK (rfx_type IN ('SUBMITTAL', 'RFI', 'ISSUE')),
   title VARCHAR(255) NOT NULL,
   priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'CRITICAL')),
@@ -1046,6 +1212,9 @@ CREATE TABLE IF NOT EXISTS project_rfx_records (
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+
+ALTER TABLE project_construction_diaries ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL;
+ALTER TABLE project_rfx_records ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES project_plan_boq_items(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS project_stage_assignments (
   id SERIAL PRIMARY KEY,
@@ -1515,5 +1684,37 @@ BEGIN
       progress_percent = GREATEST(progress_percent, 47),
       updated_at = NOW()
   WHERE id = v_project_id;
+END $$;
+
+DO $$
+DECLARE
+  seq_name TEXT;
+  max_id INTEGER;
+  target RECORD;
+BEGIN
+  FOR target IN
+    SELECT *
+    FROM (VALUES
+      ('projects', 'id'),
+      ('project_stage_templates', 'id'),
+      ('project_stages', 'id'),
+      ('project_stage_assignments', 'id'),
+      ('project_plan_boq_items', 'id'),
+      ('project_equipment_assets', 'id'),
+      ('project_equipment_logs', 'id'),
+      ('project_construction_diaries', 'id'),
+      ('project_rfx_records', 'id'),
+      ('project_material_logs', 'id'),
+      ('project_daily_material_usage', 'id'),
+      ('project_cost_entries', 'id')
+    ) AS t(table_name, column_name)
+  LOOP
+    seq_name := pg_get_serial_sequence('public.' || target.table_name, target.column_name);
+    IF seq_name IS NOT NULL THEN
+      EXECUTE format('SELECT COALESCE(MAX(%I), 0)::int FROM %I', target.column_name, target.table_name)
+      INTO max_id;
+      PERFORM setval(seq_name, GREATEST(max_id, 1), max_id > 0);
+    END IF;
+  END LOOP;
 END $$;
 

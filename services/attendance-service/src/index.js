@@ -6,7 +6,7 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
 const app = express();
-const port = Number(process.env.ATTENDANCE_SERVICE_PORT || 3004);
+const port = Number(process.env.PORT || process.env.ATTENDANCE_SERVICE_PORT || 3004);
 const MAX_DISTANCE_METERS = Number(process.env.GPS_RADIUS_METERS || 100);
 const EMBEDDING_PASS_THRESHOLD = Number(process.env.FACE_EMBEDDING_THRESHOLD || 0.88);
 const SIGNATURE_PASS_THRESHOLD = Number(process.env.FACE_SIGNATURE_THRESHOLD || 0.76);
@@ -22,13 +22,19 @@ const DEFAULT_LUNCH_BREAK_HOURS = Number(process.env.TIMESHEET_LUNCH_BREAK_HOURS
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 async function ensureAttendanceSchema() {
   await pool.query(`

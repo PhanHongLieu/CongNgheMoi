@@ -7,15 +7,21 @@ const bcrypt = require("bcryptjs");
 const { Pool } = require("pg");
 
 const app = express();
-const port = Number(process.env.AUTH_SERVICE_PORT || 3001);
+const port = Number(process.env.PORT || process.env.AUTH_SERVICE_PORT || 3001);
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 app.use(helmet());
 app.use(cors());

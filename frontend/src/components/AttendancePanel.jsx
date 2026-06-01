@@ -5,7 +5,9 @@ import { MapContainer, TileLayer, Circle, Marker, Popup } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
-const API_BASE = "http://localhost:8080/api";
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8080/api` : "http://localhost:8080/api");
 const DEFAULT_GPS_RADIUS_METERS = 100;
 const MODEL_URL = `${import.meta.env.BASE_URL || "/"}models`;
 const SCHEDULE_CACHE_KEY = "employee_schedule_cache_v1";

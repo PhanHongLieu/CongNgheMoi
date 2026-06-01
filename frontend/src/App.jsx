@@ -10,7 +10,9 @@ import {
   FACE_EMBEDDING_DIM
 } from "./utils/faceEmbedding";
 
-const API_BASE = "http://localhost:8080/api";
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8080/api` : "http://localhost:8080/api");
 const FACE_MODEL_URL = `${import.meta.env.BASE_URL || "/"}models`;
 
 function fileToDataUrl(file) {
@@ -161,6 +163,15 @@ function isTokenExpired(token) {
   return Number(payload.exp) * 1000 <= Date.now();
 }
 
+function BellIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+      <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [employeeCode, setEmployeeCode] = useState("00000004");
   const [password, setPassword] = useState("admin123");
@@ -201,6 +212,8 @@ export default function App() {
   const [faceAiStatus, setFaceAiStatus] = useState("Initializing face scanner...");
   const [faceModelsLoaded, setFaceModelsLoaded] = useState(false);
   const [faceEnrollmentStatus, setFaceEnrollmentStatus] = useState("UNREGISTERED");
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
   const faceVideoRef = useRef(null);
   const faceCanvasRef = useRef(null);
   const faceOverlayRef = useRef(null);
@@ -220,6 +233,55 @@ export default function App() {
       setToasts((prev) => prev.filter((item) => item.id !== id));
     }, 2800);
   };
+
+  const loadNotifications = async () => {
+    if (!token) {
+      setNotifications([]);
+      return;
+    }
+    setNotificationsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/notifications`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || "Failed to load notifications");
+      }
+      setNotifications(Array.isArray(data) ? data : []);
+    } catch (error) {
+      pushToast("error", error.message);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  };
+
+  const markNotificationRead = async (notificationId) => {
+    if (!token || !notificationId) return;
+    try {
+      const response = await fetch(`${API_BASE}/notifications/${notificationId}/read`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || "Failed to update notification");
+      }
+      setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, status: "READ", read_at: data.read_at || new Date().toISOString() } : item)));
+    } catch (error) {
+      pushToast("error", error.message);
+    }
+  };
+
+  useEffect(() => {
+    if (!token) {
+      setNotifications([]);
+      return undefined;
+    }
+    loadNotifications();
+    const timer = setInterval(loadNotifications, 30000);
+    return () => clearInterval(timer);
+  }, [token]);
 
   const stopFaceDetectLoop = () => {
     if (faceDetectTimerRef.current) {
@@ -565,6 +627,10 @@ export default function App() {
     () => "rounded-3xl bg-white/80 p-6 shadow-soft backdrop-blur border border-white/60",
     []
   );
+  const unreadNotificationCount = useMemo(
+    () => notifications.filter((item) => String(item.status || "UNREAD").toUpperCase() === "UNREAD").length,
+    [notifications]
+  );
 
   const login = async (event) => {
     event.preventDefault();
@@ -871,27 +937,87 @@ export default function App() {
     }
   };
 
+  const notificationControl = token ? (
+    <div className="relative">
+      <button
+        type="button"
+        aria-label="Notifications"
+        title="Notifications"
+        onClick={() => {
+          setAccountMenuOpen(false);
+          setNotificationOpen((open) => !open);
+          if (!notificationOpen) loadNotifications();
+        }}
+        className="relative inline-flex h-10 w-10 items-center justify-center rounded-full border border-steel/15 bg-white text-steel shadow-sm transition hover:bg-slate-50 hover:shadow-md"
+      >
+        <BellIcon />
+        {unreadNotificationCount > 0 && (
+          <span className="absolute -right-1 -top-1 min-w-5 rounded-full bg-red-600 px-1 text-center text-[11px] font-bold leading-5 text-white">
+            {unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}
+          </span>
+        )}
+      </button>
+      {notificationOpen && (
+        <div className="absolute right-0 top-12 z-[900] w-72 overflow-hidden rounded-2xl border border-steel/15 bg-white shadow-2xl">
+          <div className="flex items-center justify-between border-b border-steel/10 px-4 py-3">
+            <h3 className="text-sm font-bold text-steel">Notifications</h3>
+            <button type="button" onClick={loadNotifications} className="text-xs font-semibold text-emerald-700 hover:text-emerald-800">
+              {notificationsLoading ? "Loading..." : "Reload"}
+            </button>
+          </div>
+          <div className="max-h-[360px] overflow-y-auto">
+            {notifications.slice(0, 20).map((item) => {
+              const unread = String(item.status || "UNREAD").toUpperCase() === "UNREAD";
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => markNotificationRead(item.id)}
+                  className={`block w-full border-b border-steel/10 px-4 py-3 text-left hover:bg-steel/5 ${unread ? "bg-emerald-50/70" : "bg-white"}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-steel">{item.title}</p>
+                    {unread && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">NEW</span>}
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs text-graphite/75">{item.message}</p>
+                  <div className="mt-2 flex items-center justify-between text-[11px] text-graphite/50">
+                    <span>{item.notification_type || "SYSTEM"}</span>
+                    <span>{item.created_at ? new Date(item.created_at).toLocaleString("en-US") : ""}</span>
+                  </div>
+                </button>
+              );
+            })}
+            {notifications.length === 0 && (
+              <div className="px-4 py-8 text-center text-sm text-graphite/60">No notifications</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   const renderDashboardByRole = () => {
     if (!profile?.role) {
       return null;
     }
 
     if (profile.role === "SUPER_ADMIN" || profile.role === "ADMIN") {
-      return <SystemAdminWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
+      return <SystemAdminWorkspace token={token} profile={profile} notificationControl={notificationControl} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
     if (profile.role === "HR_MANAGER") {
-      return <AdminWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
+      return <AdminWorkspace token={token} profile={profile} notificationControl={notificationControl} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
     if (profile.role === "PROJECT_MANAGER") {
-      return <ManagerWorkspace token={token} profile={profile} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
+      return <ManagerWorkspace token={token} profile={profile} notificationControl={notificationControl} onOpenProfileModal={openProfileModal} onOpenPasswordModal={openPasswordModal} onOpenLogoutModal={openLogoutModal} />;
     }
 
     return (
       <EmployeeWorkspace
         token={token}
         profile={profile}
+        notificationControl={notificationControl}
         onOpenProfileModal={openProfileModal}
         onOpenPasswordModal={openPasswordModal}
         onOpenLogoutModal={openLogoutModal}

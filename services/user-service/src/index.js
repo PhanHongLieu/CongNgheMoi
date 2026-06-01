@@ -8,15 +8,21 @@ const { Pool } = require("pg");
 const Minio = require("minio");
 
 const app = express();
-const port = Number(process.env.USER_SERVICE_PORT || 3002);
+const port = Number(process.env.PORT || process.env.USER_SERVICE_PORT || 3002);
 
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || "localhost",
-  port: Number(process.env.POSTGRES_PORT || 6543),
-  database: process.env.POSTGRES_DB || "mdp_system",
-  user: process.env.POSTGRES_USER || "mdp_user",
-  password: process.env.POSTGRES_PASSWORD || "mdp_password"
-});
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+    }
+  : {
+      host: process.env.POSTGRES_HOST || "localhost",
+      port: Number(process.env.POSTGRES_PORT || 6543),
+      database: process.env.POSTGRES_DB || "mdp_system",
+      user: process.env.POSTGRES_USER || "mdp_user",
+      password: process.env.POSTGRES_PASSWORD || "mdp_password"
+    };
+const pool = new Pool(dbConfig);
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "change_access_secret";
 const TOKEN_ISSUER = process.env.TOKEN_ISSUER || "mdp-system";
@@ -120,6 +126,81 @@ async function writeDataLog({ action, collection, recordId, username, metadata }
   } catch (error) {
     console.error("writeDataLog failed:", error.message);
   }
+}
+
+async function createNotification({ userId, senderUserId, title, message, notificationType = "SYSTEM", priority = "NORMAL", actionUrl = null }, db = pool) {
+  if (!userId || !title || !message) return;
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sender_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT");
+  await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMP");
+  await db.query(
+    `INSERT INTO notifications (user_id, sender_user_id, notification_type, priority, title, message, action_url, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'UNREAD')`,
+    [
+      Number(userId),
+      senderUserId || null,
+      String(notificationType).slice(0, 40).toUpperCase(),
+      String(priority).slice(0, 20).toUpperCase(),
+      title,
+      message,
+      actionUrl
+    ]
+  );
+}
+
+async function notifyRoles(roles, notification, db = pool) {
+  const normalizedRoles = (Array.isArray(roles) ? roles : [roles]).map((role) => String(role || "").toUpperCase()).filter(Boolean);
+  if (normalizedRoles.length === 0) return;
+  const { rows } = await db.query(
+    `SELECT DISTINCT u.id
+     FROM users u
+     JOIN accounts a ON a.user_id = u.id
+     WHERE a.role = ANY($1::text[])
+       AND a.account_status = 'ACTIVE'
+       AND COALESCE(u.status, 'WORKING') = 'WORKING'`,
+    [normalizedRoles]
+  );
+  for (const row of rows) {
+    await createNotification({ ...notification, userId: row.id }, db);
+  }
+}
+
+const DEFAULT_SYSTEM_SETTINGS = {
+  gpsMaxRadius: 100,
+  faceMatchThreshold: 90,
+  maxLoginAttempts: 5,
+  lockoutDuration: 30,
+  sessionTimeout: 60
+};
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function normalizeSystemSettings(input = {}) {
+  return {
+    gpsMaxRadius: clampNumber(input.gpsMaxRadius, 10, 500, DEFAULT_SYSTEM_SETTINGS.gpsMaxRadius),
+    faceMatchThreshold: clampNumber(input.faceMatchThreshold, 50, 100, DEFAULT_SYSTEM_SETTINGS.faceMatchThreshold),
+    maxLoginAttempts: clampNumber(input.maxLoginAttempts, 3, 10, DEFAULT_SYSTEM_SETTINGS.maxLoginAttempts),
+    lockoutDuration: clampNumber(input.lockoutDuration, 5, 120, DEFAULT_SYSTEM_SETTINGS.lockoutDuration),
+    sessionTimeout: clampNumber(input.sessionTimeout, 15, 480, DEFAULT_SYSTEM_SETTINGS.sessionTimeout)
+  };
+}
+
+async function ensureSystemSettingsSchema() {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS system_settings (
+      setting_key VARCHAR(120) PRIMARY KEY,
+      setting_value JSONB NOT NULL,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
 }
 
 function authenticate(req, res, next) {
@@ -441,6 +522,112 @@ function applyHolidayPolicy(metrics, holidayMode) {
 
 app.get("/health", (req, res) => {
   res.json({ service: "user-service", status: "ok" });
+});
+
+app.get("/audit/logs", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
+  try {
+    const action = String(req.query.action || "").trim();
+    const user = String(req.query.user || "").trim();
+    const from = String(req.query.from || "").trim();
+    const to = String(req.query.to || "").trim();
+    const limit = Math.min(Math.max(Number(req.query.limit || 200), 1), 500);
+    const values = [];
+    const filters = [];
+
+    if (action) {
+      values.push(action);
+      filters.push(`UPPER(dl.action) = UPPER($${values.length})`);
+    }
+    if (user) {
+      values.push(`%${user}%`);
+      filters.push(`(
+        dl.username ILIKE $${values.length}
+        OR u.full_name ILIKE $${values.length}
+        OR u.employee_code ILIKE $${values.length}
+      )`);
+    }
+    if (from) {
+      values.push(from);
+      filters.push(`dl.created_at >= $${values.length}::date`);
+    }
+    if (to) {
+      values.push(to);
+      filters.push(`dl.created_at < ($${values.length}::date + INTERVAL '1 day')`);
+    }
+
+    values.push(limit);
+    const { rows } = await pool.query(
+      `SELECT
+         dl.id,
+         dl.service_name,
+         UPPER(dl.action) AS action,
+         dl.collection,
+         dl.record_id,
+         dl.username,
+         dl.metadata,
+         dl.created_at,
+         COALESCE(u.full_name, dl.username, 'System') AS user_name,
+         COALESCE(u.employee_code, '') AS employee_code,
+         CONCAT_WS(' ',
+           dl.service_name || ':',
+           UPPER(dl.action),
+           dl.collection,
+           CASE WHEN dl.record_id IS NOT NULL THEN '#' || dl.record_id ELSE NULL END
+         ) AS details,
+         NULL::text AS ip_address
+       FROM data_logs dl
+       LEFT JOIN users u ON LOWER(u.email) = LOWER(dl.username)
+       ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+       ORDER BY dl.created_at DESC, dl.id DESC
+       LIMIT $${values.length}`,
+      values
+    );
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load audit log", error: error.message });
+  }
+});
+
+app.get("/system/settings", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
+  try {
+    await ensureSystemSettingsSchema();
+    const { rows } = await pool.query(
+      "SELECT setting_value FROM system_settings WHERE setting_key = 'global'"
+    );
+    const saved = rows[0]?.setting_value || {};
+    return res.json(normalizeSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...saved }));
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to load system settings", error: error.message });
+  }
+});
+
+app.put("/system/settings", authenticate, authorize("SUPER_ADMIN", "ADMIN"), async (req, res) => {
+  try {
+    await ensureSystemSettingsSchema();
+    const settings = normalizeSystemSettings(req.body || {});
+    const updatedBy = Number.isInteger(Number(req.user?.sub)) ? Number(req.user.sub) : null;
+    const { rows } = await pool.query(
+      `INSERT INTO system_settings (setting_key, setting_value, updated_by)
+       VALUES ('global', $1::jsonb, $2)
+       ON CONFLICT (setting_key)
+       DO UPDATE SET
+         setting_value = EXCLUDED.setting_value,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()
+       RETURNING setting_value`,
+      [JSON.stringify(settings), updatedBy]
+    );
+    await writeDataLog({
+      action: "update",
+      collection: "system-settings",
+      recordId: "global",
+      username: req.user.email,
+      metadata: settings
+    });
+    return res.json(rows[0].setting_value);
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to save system settings", error: error.message });
+  }
 });
 
 app.get("/users", authenticate, authorize("HR_MANAGER", "PROJECT_MANAGER"), async (req, res) => {
@@ -1060,6 +1247,27 @@ app.put("/users/:id/face-template", authenticate, authorize("HR_MANAGER", "PROJE
       metadata: normalizedTemplate.metadata
     });
 
+    if (submittedStatus === "PENDING") {
+      await notifyRoles("HR_MANAGER", {
+        senderUserId: req.user.sub,
+        title: "Face enrollment pending review",
+        message: `${result.rows[0].full_name} submitted face enrollment and is waiting for HR approval.`,
+        notificationType: "FACE_ENROLLMENT",
+        priority: "NORMAL",
+        actionUrl: "/users/face-status"
+      });
+    } else if (req.user.sub !== userId) {
+      await createNotification({
+        userId,
+        senderUserId: req.user.sub,
+        title: "Face enrollment approved",
+        message: "Your face enrollment was approved and saved by HR.",
+        notificationType: "FACE_ENROLLMENT",
+        priority: "NORMAL",
+        actionUrl: "/profile"
+      });
+    }
+
     return res.json({
       message: submittedStatus === "APPROVED" ? "Face template approved and saved" : "Face template submitted. Waiting for HR approval",
       user: result.rows[0]
@@ -1149,6 +1357,16 @@ app.put("/users/:id/face-enrollment/review", authenticate, authorize("HR_MANAGER
       metadata: { decision, note }
     });
 
+    await createNotification({
+      userId,
+      senderUserId: req.user.sub,
+      title: `Face enrollment ${decision.toLowerCase()}`,
+      message: `Your face enrollment was ${decision.toLowerCase()}${note ? `: ${note}` : "."}`,
+      notificationType: "FACE_ENROLLMENT",
+      priority: decision === "REJECTED" ? "HIGH" : "NORMAL",
+      actionUrl: "/profile"
+    });
+
     return res.json({ message: `Face enrollment ${decision.toLowerCase()} successfully`, user: result.rows[0] });
   } catch (error) {
     return res.status(500).json({ message: "Failed to review face enrollment", error: error.message });
@@ -1180,6 +1398,16 @@ app.delete("/users/:id/face-template", authenticate, authorize("HR_MANAGER"), as
       collection: "user-face-template",
       recordId: String(userId),
       username: req.user.email
+    });
+
+    await createNotification({
+      userId,
+      senderUserId: req.user.sub,
+      title: "Face enrollment reset",
+      message: "Your face enrollment template was reset by HR. Please enroll again before using face attendance.",
+      notificationType: "FACE_ENROLLMENT",
+      priority: "HIGH",
+      actionUrl: "/profile"
     });
 
     return res.json({ message: "Face template reset successfully" });
@@ -1763,6 +1991,7 @@ async function ensureSalarySchema() {
 }
 
 async function start() {
+  await ensureSystemSettingsSchema();
   await ensureSalarySchema();
 app.listen(port, () => {
   console.log(`user-service listening on ${port}`);

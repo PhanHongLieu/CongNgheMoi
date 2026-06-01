@@ -29,7 +29,7 @@ function SystemSettingsPage({ token }) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await apiRequest("/system/settings", token, "PUT", settings);
+      await apiRequest("/system/settings", token, { method: "PUT", body: settings });
       setStatus("Settings saved successfully");
     } catch (error) {
       setStatus(`Failed to save settings: ${error.message}`);
